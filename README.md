@@ -1,8 +1,3 @@
-[![DigitalOcean Referral Badge](https://web-platforms.sfo2.cdn.digitaloceanspaces.com/WWW/Badge%203.svg)](https://www.digitalocean.com/?refcode=9b9563b5b0b2&utm_campaign=Referral_Invite&utm_medium=Referral_Program&utm_source=badge)
-
-🚀 速来拼好模，智谱 GLM Coding 超值订阅，邀你一起薅羊毛！Claude Code、Cline 等 20+ 大编程工具无缝支持，“码力”全开，越拼越爽！立即开拼，享限时惊喜价！
-      链接：https://www.bigmodel.cn/glm-coding?ic=QJ82Z7R8YK
-	  
 # 🚀 EdgeTunnel (Refactored)
 
 > **致敬与鸣谢**：
@@ -84,6 +79,19 @@ npx wrangler deploy
 ---
 
 ## ⚙️ 进阶配置
+
+### 自主可控运行方式
+
+默认部署不再从第三方 GitHub、订阅转换站、代理回退站或外部管理页面加载运行时内容。登录页和管理页已内置；优选地址使用本地生成，并可通过认证后的 `POST /admin/ADD.txt` 保存自己的地址列表。
+
+以下远程能力默认关闭，只有明确配置为自己控制的 HTTPS 服务时才启用：
+
+- `订阅转换配置.SUBAPI` 与 `订阅转换配置.SUBCONFIG`：自建订阅转换服务和配置文件。
+- `本地规则集URL`：自建 Sing-box 规则集目录（例如 `https://rules.example.com`）。
+- `ECH_DOH_URL`：自建或自行选择的 HTTPS DoH 服务；仅在启用 ECH 时使用。
+- `ALLOW_REMOTE_USAGE_API=true`：允许管理员保存的 HTTPS 用量 API。未设置时不会发起该请求。
+
+不要把 `跳过证书验证` 设为 `true`，除非你了解由此带来的中间人攻击风险。
 
 ### 绑定自定义域名
 在 `wrangler.toml` 中添加 `routes`：
