@@ -30,6 +30,9 @@ export function nginx() {
 }
 
 export function html1101(host, accessIP) {
+    const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
+    host = escapeHtml(host);
+    accessIP = escapeHtml(accessIP);
     const now = new Date();
     const formattedTime = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0') + ' ' + String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0') + ':' + String(now.getSeconds()).padStart(2, '0');
     const randomStr = Array.from(crypto.getRandomValues(new Uint8Array(8))).map(b => b.toString(16).padStart(2, '0')).join('');
@@ -106,23 +109,26 @@ export function html1101(host, accessIP) {
 }
 
 export async function fetchMasquerade(url, request) {
-    try {
-        const reqHeaders = new Headers(request.headers);
-        const maskUrlObj = new URL(url);
-        reqHeaders.set('Host', maskUrlObj.host);
-        reqHeaders.set('Referer', maskUrlObj.origin);
-        reqHeaders.set('Origin', maskUrlObj.origin);
+    const maskUrlObj = new URL(url);
+    if (maskUrlObj.protocol !== 'https:') throw new Error('Masquerade origin must use HTTPS');
 
-        const res = await fetch(url + new URL(request.url).pathname + new URL(request.url).search, {
-            method: request.method,
-            headers: reqHeaders,
-            body: request.body,
-            cf: request.cf
-        });
+    const requestUrl = new URL(request.url);
+    const forwardedHeaders = new Headers();
+    for (const header of ['accept', 'accept-language', 'content-type', 'range', 'user-agent']) {
+        const value = request.headers.get(header);
+        if (value) forwardedHeaders.set(header, value);
+    }
+
+    const target = new URL(requestUrl.pathname + requestUrl.search, maskUrlObj);
+    const init = { method: request.method, headers: forwardedHeaders };
+    if (!['GET', 'HEAD'].includes(request.method)) init.body = request.body;
+
+    try {
+        const res = await fetch(target, init);
 
         const contentType = res.headers.get('content-type') || '';
         if (/text|javascript|json|xml/.test(contentType)) {
-            const text = (await res.text()).replaceAll(maskUrlObj.host, new URL(request.url).host);
+            const text = (await res.text()).replaceAll(maskUrlObj.host, requestUrl.host);
             return new Response(text, { status: res.status, headers: { ...Object.fromEntries(res.headers), 'Cache-Control': 'no-store' } });
         }
         return res;

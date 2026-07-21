@@ -87,7 +87,20 @@ export async function handleSub(request, env, config) {
     } else {
         // Subconverter
         const subApi = config.订阅转换配置.SUBAPI;
-        const subUrl = `${subApi}/sub?target=${type}&url=${encodeURIComponent(url.protocol + '//' + url.host + '/sub?target=mixed&token=' + subToken)}&config=${encodeURIComponent(config.订阅转换配置.SUBCONFIG)}&emoji=${config.订阅转换配置.SUBEMOJI}&scv=${config.跳过证书验证}`;
+        const subConfig = config.订阅转换配置.SUBCONFIG;
+        if (!subApi || !subConfig) {
+            return new Response('Remote subscription conversion is disabled. Configure an operator-owned SUBAPI and SUBCONFIG to enable it.', { status: 501 });
+        }
+        let subApiUrl;
+        let subConfigUrl;
+        try {
+            subApiUrl = new URL(subApi);
+            subConfigUrl = new URL(subConfig);
+            if (subApiUrl.protocol !== 'https:' || subConfigUrl.protocol !== 'https:') throw new Error('Remote conversion endpoints must use HTTPS');
+        } catch {
+            return new Response('Invalid remote subscription conversion configuration', { status: 500 });
+        }
+        const subUrl = `${subApiUrl.origin}${subApiUrl.pathname.replace(/\/$/, '')}/sub?target=${type}&url=${encodeURIComponent(url.protocol + '//' + url.host + '/sub?target=mixed&token=' + subToken)}&config=${encodeURIComponent(subConfigUrl.href)}&emoji=${config.订阅转换配置.SUBEMOJI}&scv=${config.跳过证书验证}`;
         try {
             const res = await fetch(subUrl, { headers: { 'User-Agent': 'Subconverter...' } });
             if (res.ok) {

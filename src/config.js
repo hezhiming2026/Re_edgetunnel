@@ -4,7 +4,7 @@ import { generateRandomIP, organizeToArray, getCloudflareUsage } from './utils/i
 
 export async function readConfig(env, hostname, userID, path, reset = false) {
     const host = hostname;
-    const CM_DoH = "https://doh.cmliussss.net/CMLiussss";
+    const CM_DoH = env.ECH_DOH_URL || null;
     const initStartTime = performance.now();
 
     // Default config
@@ -15,7 +15,7 @@ export async function readConfig(env, hostname, userID, path, reset = false) {
         UUID: userID,
         协议类型: "vless",
         传输协议: "ws",
-        跳过证书验证: true,
+        跳过证书验证: false,
         启用0RTT: false,
         TLS分片: null,
         随机路径: false,
@@ -38,8 +38,8 @@ export async function readConfig(env, hostname, userID, path, reset = false) {
             TOKEN: await MD5MD5(hostname + userID),
         },
         订阅转换配置: {
-            SUBAPI: "https://SUBAPI.cmliussss.net",
-            SUBCONFIG: "https://raw.githubusercontent.com/cmliu/ACL4SSR/refs/heads/main/Clash/config/ACL4SSR_Online_Mini_MultiMode_CF.ini",
+            SUBAPI: null,
+            SUBCONFIG: null,
             SUBEMOJI: false,
         },
         反代: {
@@ -143,9 +143,12 @@ export async function readConfig(env, hostname, userID, path, reset = false) {
             await env.KV.put('cf.json', JSON.stringify(defaultCF, null, 2));
         } else {
             const cf = JSON.parse(cfStr);
-            if (cf.UsageAPI) {
+            if (cf.UsageAPI && env.ALLOW_REMOTE_USAGE_API === 'true') {
                 try {
-                    const response = await fetch(cf.UsageAPI);
+                    const usageUrl = new URL(cf.UsageAPI);
+                    if (usageUrl.protocol !== 'https:' || usageUrl.username || usageUrl.password) throw new Error('UsageAPI must be an HTTPS URL without credentials');
+                    const response = await fetch(usageUrl);
+                    if (!response.ok) throw new Error(`UsageAPI returned ${response.status}`);
                     config_JSON.CF.Usage = await response.json();
                 } catch (err) {
                     console.error(`请求 CF_JSON.UsageAPI 失败: ${err.message}`);
@@ -176,7 +179,7 @@ export async function logRequest(env, request, accessIP, type = "Get_SUB", confi
             IP: accessIP,
             ASN: `AS${request.cf.asn || '0'} ${request.cf.asOrganization || 'Unknown'}`,
             CC: `${request.cf.country || 'N/A'} ${request.cf.city || 'N/A'}`,
-            URL: request.url,
+            URL: sanitizeLogUrl(request.url),
             UA: request.headers.get('User-Agent') || 'Unknown',
             TIME: now.getTime()
         };
@@ -207,6 +210,12 @@ export async function logRequest(env, request, accessIP, type = "Get_SUB", confi
         } else { logArray = [logContent]; }
         await env.KV.put('log.json', JSON.stringify(logArray, null, 2));
     } catch (error) { console.error(`日志记录失败: ${error.message}`); }
+}
+
+export function sanitizeLogUrl(input) {
+    const url = new URL(input);
+    for (const key of ['token', 'password', 'authorization', 'auth', 'key', 'apikey', 'api_key']) url.searchParams.delete(key);
+    return url.toString();
 }
 
 async function sendTGMessage(botToken, chatID, log, config) {

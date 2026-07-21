@@ -81,6 +81,10 @@ export default {
                 return handleAdmin(request, env, config, pathLower);
             }
             if (pathLower === 'sub') {
+                const expectedToken = await MD5MD5(url.hostname + userID);
+                if (url.searchParams.get('token') !== expectedToken) {
+                    return new Response(JSON.stringify({ success: false, msg: 'Invalid Token' }), { status: 403, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+                }
                 const config = await readConfig(env, url.hostname, userID, path);
                 return handleSub(request, env, config);
             }

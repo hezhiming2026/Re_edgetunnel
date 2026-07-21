@@ -14,11 +14,12 @@ export async function organizeToArray(content) {
 export async function generateRandomIP(request, count = 16, designatedPort = -1) {
     const asnMap = { '9808': 'cmcc', '4837': 'cu', '4134': 'ct' };
     const asn = request.cf?.asn;
-    const cidr_url = asnMap[asn] ? `https://raw.githubusercontent.com/cmliu/cmliu/main/CF-CIDR/${asnMap[asn]}.txt` : 'https://raw.githubusercontent.com/cmliu/cmliu/main/CF-CIDR.txt';
     const cfname = { '9808': 'CF移动优选', '4837': 'CF联通优选', '4134': 'CF电信优选' }[asn] || 'CF官方优选';
     const cfport = [443, 2053, 2083, 2087, 2096, 8443];
     let cidrList = [];
-    try { const res = await fetch(cidr_url); cidrList = res.ok ? await organizeToArray(await res.text()) : ['104.16.0.0/13']; } catch { cidrList = ['104.16.0.0/13']; }
+    // Keep this default self-contained. Operators who need a curated list can
+    // place addresses in ADD.txt through the authenticated admin endpoint.
+    cidrList = ['104.16.0.0/13'];
 
     const generateRandomIPFromCIDR = (cidr) => {
         const [baseIP, prefixLength] = cidr.split('/'), prefix = parseInt(prefixLength), hostBits = 32 - prefix;
