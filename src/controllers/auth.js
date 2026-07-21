@@ -1,4 +1,6 @@
 
+import { loginPage } from '../utils/pages.js';
+
 const SESSION_TTL_SECONDS = 60 * 60 * 24;
 const SESSION_PREFIX = 'session:';
 
@@ -57,7 +59,7 @@ export async function handleLogin(request, env) {
             return response;
         }
     }
-    return fetch('https://edt-pages.github.io/login');
+    return new Response(loginPage(), { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' } });
 }
 
 export async function handleLogout(request, env) {

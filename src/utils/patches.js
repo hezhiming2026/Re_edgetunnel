@@ -1,5 +1,5 @@
 
-export function SingboxPatch(content, uuid, fingerprint, ech_config) {
+export function SingboxPatch(content, uuid, fingerprint, ech_config, ruleSetBaseUrl = null) {
     const sb_json_text = content.replace('1.1.1.1', '8.8.8.8').replace('1.0.0.1', '8.8.4.4');
     try {
         let config = JSON.parse(sb_json_text);
@@ -38,21 +38,21 @@ export function SingboxPatch(content, uuid, fingerprint, ech_config) {
         const processRules = (rules, isDns = false) => {
             if (!Array.isArray(rules)) return;
             rules.forEach(rule => {
-                if (rule.geosite) {
+                if (rule.geosite && ruleSetBaseUrl) {
                     const list = Array.isArray(rule.geosite) ? rule.geosite : [rule.geosite];
                     rule.rule_set = list.map(name => {
                         const tag = `geosite-${name}`;
-                        if (!ruleSetsDefinitions.has(tag)) ruleSetsDefinitions.set(tag, { tag, type: "remote", format: "binary", url: `https://gh.090227.xyz/https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-${name}.srs`, download_detour: "DIRECT" });
+                        if (!ruleSetsDefinitions.has(tag)) ruleSetsDefinitions.set(tag, { tag, type: "remote", format: "binary", url: `${ruleSetBaseUrl.replace(/\/$/, '')}/geosite-${name}.srs`, download_detour: "DIRECT" });
                         return tag;
                     });
                     delete rule.geosite;
                 }
-                if (rule.geoip) {
+                if (rule.geoip && ruleSetBaseUrl) {
                     const list = Array.isArray(rule.geoip) ? rule.geoip : [rule.geoip];
                     rule.rule_set = rule.rule_set || [];
                     list.forEach(name => {
                         const tag = `geoip-${name}`;
-                        if (!ruleSetsDefinitions.has(tag)) ruleSetsDefinitions.set(tag, { tag, type: "remote", format: "binary", url: `https://gh.090227.xyz/https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-${name}.srs`, download_detour: "DIRECT" });
+                        if (!ruleSetsDefinitions.has(tag)) ruleSetsDefinitions.set(tag, { tag, type: "remote", format: "binary", url: `${ruleSetBaseUrl.replace(/\/$/, '')}/geoip-${name}.srs`, download_detour: "DIRECT" });
                         rule.rule_set.push(tag);
                     });
                     delete rule.geoip;

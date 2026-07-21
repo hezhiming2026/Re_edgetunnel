@@ -4,9 +4,14 @@ import { generateRandomIP } from "../utils/ip.js";
 import { SingboxPatch, ClashPatch, SurgePatch } from "../utils/patches.js";
 import { logRequest } from "../config.js";
 
-async function getECH(host) {
+async function getECH(host, dohUrl) {
+    if (!dohUrl) return '';
     try {
-        const res = await fetch(`https://1.1.1.1/dns-query?name=${encodeURIComponent(host)}&type=65`, { headers: { 'accept': 'application/dns-json' } });
+        const resolver = new URL(dohUrl);
+        if (resolver.protocol !== 'https:') return '';
+        resolver.searchParams.set('name', host);
+        resolver.searchParams.set('type', '65');
+        const res = await fetch(resolver, { headers: { 'accept': 'application/dns-json' } });
         const data = await res.json();
         if (!data.Answer?.length) return '';
         for (let ans of data.Answer) {
@@ -64,7 +69,7 @@ export async function handleSub(request, env, config) {
         let links = '';
         const path = config.启用0RTT ? config.PATH + '?ed=2560' : config.PATH;
         const tlsFrag = config.TLS分片 == 'Shadowrocket' ? `&fragment=${encodeURIComponent('1,40-60,30-50,tlshello')}` : config.TLS分片 == 'Happ' ? `&fragment=${encodeURIComponent('3,1,tlshello')}` : '';
-        const echParam = config.CCH ? `&ech=${encodeURIComponent((config.ECHConfig.SNI ? config.ECHConfig.SNI + '+' : '') + config.ECHConfig.DNS)}` : '';
+        const echParam = config.ECH && config.ECHConfig?.DNS ? `&ech=${encodeURIComponent((config.ECHConfig.SNI ? config.ECHConfig.SNI + '+' : '') + config.ECHConfig.DNS)}` : '';
 
         if (config.优选订阅生成.local) {
             const [ipsArr, _] = await generateRandomIP(request, config.优选订阅生成.本地IP库.随机数量, config.优选订阅生成.本地IP库.指定端口);
@@ -117,8 +122,8 @@ export async function handleSub(request, env, config) {
     if (type === 'mixed' && (!ua.includes('mozilla') || url.searchParams.has('base64'))) content = btoa(content);
 
     if (type === 'singbox') {
-        const echVal = config.ECH ? await getECH(config.ECHConfig.SNI || host) : null;
-        content = SingboxPatch(content, config.UUID, config.Fingerprint, echVal);
+        const echVal = config.ECH ? await getECH(config.ECHConfig.SNI || host, config.ECHConfig?.DNS) : null;
+        content = SingboxPatch(content, config.UUID, config.Fingerprint, echVal, config.本地规则集URL);
         responseHeaders["content-type"] = 'application/json; charset=utf-8';
     } else if (type === 'clash') {
         content = ClashPatch(content, config.UUID, config.ECH, config.HOSTS, config.ECHConfig.SNI, config.ECHConfig.DNS);

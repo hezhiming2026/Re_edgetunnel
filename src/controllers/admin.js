@@ -4,6 +4,7 @@ import { getCloudflareUsage, requestOptimalAPI, generateRandomIP } from "../util
 import { getSocks5Account } from "../utils/helpers.js";
 import { socks5Connect, httpConnect } from "../protocols/socks5.js";
 import { isTrustedRequestOrigin } from "./auth.js";
+import { adminPage } from '../utils/pages.js';
 
 function forbiddenResponse() {
     return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
@@ -152,5 +153,5 @@ export async function handleAdmin(request, env, config, path) {
         return new Response(JSON.stringify(request.cf, null, 2), { status: 200 });
     }
 
-    return fetch('https://edt-pages.github.io/admin');
+    return new Response(adminPage(), { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' } });
 }

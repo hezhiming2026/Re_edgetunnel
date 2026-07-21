@@ -42,6 +42,7 @@ export async function readConfig(env, hostname, userID, path, reset = false) {
             SUBCONFIG: null,
             SUBEMOJI: false,
         },
+        本地规则集URL: null,
         反代: {
             PROXYIP: "auto",
             SOCKS5: {

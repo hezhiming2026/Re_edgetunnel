@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { sanitizeLogUrl } from '../src/config.js';
 import { fetchMasquerade } from '../src/utils/pages.js';
+import { SingboxPatch } from '../src/utils/patches.js';
 
 test('request logs remove subscription credentials', () => {
     const logged = sanitizeLogUrl('https://worker.example/sub?token=secret&clash&api_key=also-secret');
@@ -35,4 +36,10 @@ test('masquerade forwarding drops credentials and Cloudflare client headers', as
     assert.equal(outbound.init.headers.get('cf-connecting-ip'), null);
     assert.equal(outbound.init.headers.get('x-forwarded-for'), null);
     assert.equal(outbound.init.headers.get('accept'), 'text/html');
+});
+
+test('Sing-box patch emits remote rule sets only for an operator-provided base URL', () => {
+    const input = JSON.stringify({ route: { rules: [{ geosite: 'cn', outbound: 'DIRECT' }] } });
+    assert.doesNotMatch(SingboxPatch(input, null, null, null), /https:\/\//);
+    assert.match(SingboxPatch(input, null, null, null, 'https://rules.example'), /https:\/\/rules\.example\/geosite-cn\.srs/);
 });

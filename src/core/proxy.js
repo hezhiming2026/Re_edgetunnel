@@ -194,8 +194,9 @@ async function forwardDataTCP(host, portNum, rawData, ws, respHeader, remoteConn
             const parsed = await getSocks5Account(socks5Account);
             newSocket = await httpConnect(host, portNum, rawData, parsed);
         } else {
+            if (!proxyIP) throw new Error('No proxy fallback is configured');
             const proxyList = await parseProxyAddress(proxyIP, host, yourUUID);
-            newSocket = await connectDirect(atob('UFJPWFlJUC50cDEuMDkwMjI3Lnh5eg=='), 1, rawData, proxyList, enableProxyFallback);
+            newSocket = await connectDirect(proxyIP, 443, rawData, proxyList, enableProxyFallback);
         }
         remoteConnWrapper.socket = newSocket;
         newSocket.closed.catch(() => { }).finally(() => closeSocketQuietly(ws));
@@ -210,7 +211,7 @@ async function forwardDataTCP(host, portNum, rawData, ws, respHeader, remoteConn
         try {
             const initialSocket = await connectDirect(host, portNum, rawData);
             remoteConnWrapper.socket = initialSocket;
-            connectStreams(initialSocket, ws, respHeader, connectToProxy);
+            connectStreams(initialSocket, ws, respHeader, proxyIP ? connectToProxy : null);
         } catch (err) {
             await connectToProxy();
         }

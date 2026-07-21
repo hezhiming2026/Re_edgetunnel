@@ -29,6 +29,14 @@ export function nginx() {
 	`
 }
 
+export function loginPage() {
+    return `<!doctype html><meta charset="utf-8"><title>EdgeTunnel login</title><form method="post"><label>Password <input name="password" type="password" required autofocus></label><button>Log in</button></form>`;
+}
+
+export function adminPage() {
+    return `<!doctype html><meta charset="utf-8"><title>EdgeTunnel admin</title><h1>EdgeTunnel admin</h1><p>This self-hosted minimal admin page has no external asset dependency.</p><ul><li><a href="/admin/config.json">Configuration JSON</a></li><li><a href="/admin/ADD.txt">Local address list</a></li><li><a href="/admin/log.json">Request log</a></li><li><a href="/logout">Log out</a></li></ul><p>Use authenticated same-origin POST requests for configuration updates.</p>`;
+}
+
 export function html1101(host, accessIP) {
     const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
     host = escapeHtml(host);

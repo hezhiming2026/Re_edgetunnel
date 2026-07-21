@@ -34,3 +34,9 @@ test('trusted mutation origin only accepts the Worker origin', () => {
     assert.equal(isTrustedRequestOrigin(request('https://worker.example/admin/init', { method: 'POST', headers: { Origin: 'https://attacker.example' } })), false);
     assert.equal(isTrustedRequestOrigin(request('https://worker.example/admin/init', { method: 'POST' })), false);
 });
+
+test('login fallback is self-hosted and does not require a remote page', async () => {
+    const response = await handleLogin(request('https://worker.example/login'), { ADMIN: 'secret', KV: new MemoryKV() });
+    assert.equal(response.status, 200);
+    assert.match(await response.text(), /<form method="post">/);
+});

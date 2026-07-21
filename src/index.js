@@ -30,13 +30,13 @@ export default {
         if (upgradeHeader === 'websocket') {
             if (adminPassword) {
                 let proxyConfig = {
-                    proxyIP: env.PROXYIP || 'auto',
+                    proxyIP: env.PROXYIP || null,
                     socks5Type: null,
                     socks5Account: '',
                     socks5Global: false,
                     socks5Whitelist: ['*tapecontent.net', 'scholar.google.com'],
                     cachedProxyIndexRef: { value: 0 },
-                    enableProxyFallback: true
+                    enableProxyFallback: Boolean(env.PROXYIP)
                 };
 
                 const proxyMatch = pathLower.match(/\/(proxyip[.=]|pyip=|ip=)(.+)/);
@@ -57,8 +57,7 @@ export default {
         // --- HTTP Handling ---
         if (url.protocol === 'http:') return Response.redirect(url.href.replace('http:', 'https:'), 301);
 
-        const staticPage = 'https://edt-pages.github.io';
-        if (!adminPassword) return fetch(staticPage + '/noADMIN');
+        if (!adminPassword) return new Response('Administrator password is not configured.', { status: 503 });
 
         if (env.KV && typeof env.KV.get === 'function') {
             if (path === secretKey && secretKey !== '勿动此默认密钥，有需求请自行通过添加变量KEY进行修改') {
@@ -93,7 +92,7 @@ export default {
             }
             if (pathLower === 'robots.txt') return new Response('User-agent: *\nDisallow: /');
         } else if (!envUUID) {
-            return fetch(staticPage + '/noKV');
+            return new Response('KV binding or UUID configuration is required.', { status: 503 });
         }
 
         let masqueradeUrl = env.URL || 'nginx';
