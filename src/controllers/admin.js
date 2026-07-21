@@ -3,6 +3,15 @@ import { readConfig, logRequest } from "../config.js";
 import { getCloudflareUsage, requestOptimalAPI, generateRandomIP } from "../utils/ip.js";
 import { getSocks5Account } from "../utils/helpers.js";
 import { socks5Connect, httpConnect } from "../protocols/socks5.js";
+import { isTrustedRequestOrigin } from "./auth.js";
+
+function forbiddenResponse() {
+    return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+}
+
+function requiresTrustedMutation(request) {
+    return request.method === 'POST' && isTrustedRequestOrigin(request);
+}
 
 async function checkSocksProxy(protocol, param) {
     const startTime = Date.now();
@@ -70,6 +79,7 @@ export async function handleAdmin(request, env, config, path) {
         }
         return new Response(JSON.stringify({ error: 'Missing defined parameters' }), { status: 400 });
     } else if (path === 'admin/init') {
+        if (!requiresTrustedMutation(request)) return forbiddenResponse();
         try {
             const newConfig = await readConfig(env, config.HOST, config.UUID, config.PATH, true); // true to reset
             config = newConfig;
@@ -79,6 +89,7 @@ export async function handleAdmin(request, env, config, path) {
             return new Response(JSON.stringify({ error: err.message }), { status: 500 });
         }
     } else if (request.method === 'POST') {
+        if (!isTrustedRequestOrigin(request)) return forbiddenResponse();
         if (path === 'admin/config.json') {
             try {
                 const newConfig = await request.json();

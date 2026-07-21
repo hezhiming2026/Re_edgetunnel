@@ -1,0 +1,9 @@
+{
+  "name": "re-edgetunnel",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node --check src/index.js && node --check src/config.js && node --check src/controllers/admin.js && node --check src/controllers/auth.js && node --check src/controllers/sub.js && node --check src/core/proxy.js && node --check src/protocols/parsers.js && node --check src/protocols/socks5.js && node --check src/utils/helpers.js && node --check src/utils/ip.js && node --check src/utils/pages.js && node --check src/utils/patches.js",
+    "test": "node --test"
+  }
+}

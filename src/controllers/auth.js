@@ -1,50 +1,71 @@
 
-import { MD5MD5 } from '../utils/helpers.js';
+const SESSION_TTL_SECONDS = 60 * 60 * 24;
+const SESSION_PREFIX = 'session:';
 
-export async function checkAuth(request, env, config) {
+function getAdminPassword(env) {
+    return env.ADMIN || env.admin || env.PASSWORD || env.password || env.pswd || env.TOKEN || env.KEY || env.UUID || env.uuid;
+}
+
+function getCookie(request, name) {
     const cookies = request.headers.get('Cookie') || '';
-    const authCookie = cookies.split(';').find(c => c.trim().startsWith('auth='))?.split('=')[1];
-    const UA = request.headers.get('User-Agent') || 'null';
+    return cookies.split(';').map((cookie) => cookie.trim()).find((cookie) => cookie.startsWith(`${name}=`))?.slice(name.length + 1);
+}
 
-    // config.UUID is userID, we need Admin password which is env.ADMIN/TOKEN etc.
-    // Wait, in `_worker.js`:
-    // const 管理员密码 = env.ADMIN || ... || env.uuid;
-    // const 加密秘钥 = env.KEY || ...;
-    // const userIDMD5 = await MD5MD5(管理员密码 + 加密秘钥);
+async function sessionKey(token) {
+    const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token));
+    return `${SESSION_PREFIX}${Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
+}
 
-    // Config doesn't strictly store '管理员密码' raw. `checkAuth` needs it.
-    // We should probably pass these env vars or calculated values.
+function createSessionToken() {
+    const bytes = crypto.getRandomValues(new Uint8Array(32));
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
 
-    const adminPassword = env.ADMIN || env.admin || env.PASSWORD || env.password || env.pswd || env.TOKEN || env.KEY || env.UUID || env.uuid;
-    const secretKey = env.KEY || '勿动此默认密钥，有需求请自行通过添加变量KEY进行修改';
+export function isTrustedRequestOrigin(request) {
+    const requestUrl = new URL(request.url);
+    const origin = request.headers.get('Origin');
+    if (origin) return origin === requestUrl.origin;
 
-    // logic: if (authCookie == await MD5MD5(UA + 加密秘钥 + 管理员密码))
-    const expected = await MD5MD5(UA + secretKey + adminPassword);
+    const referer = request.headers.get('Referer');
+    if (!referer) return false;
+    try {
+        return new URL(referer).origin === requestUrl.origin;
+    } catch {
+        return false;
+    }
+}
 
-    return authCookie === expected;
+export async function checkAuth(request, env) {
+    const authCookie = getCookie(request, 'auth');
+    if (!authCookie || !env.KV?.get) return false;
+
+    return (await env.KV.get(await sessionKey(authCookie))) === 'active';
 }
 
 export async function handleLogin(request, env) {
-    const adminPassword = env.ADMIN || env.admin || env.PASSWORD || env.password || env.pswd || env.TOKEN || env.KEY || env.UUID || env.uuid;
-    const secretKey = env.KEY || '勿动此默认密钥，有需求请自行通过添加变量KEY进行修改';
-    const UA = request.headers.get('User-Agent') || 'null';
+    const adminPassword = getAdminPassword(env);
 
-    if (request.method === 'POST') {
+    if (request.method === 'POST' && adminPassword && env.KV?.put) {
         const formData = await request.text();
         const params = new URLSearchParams(formData);
         const inputPassword = params.get('password');
         if (inputPassword === adminPassword) {
+            const authValue = createSessionToken();
+            await env.KV.put(await sessionKey(authValue), 'active', { expirationTtl: SESSION_TTL_SECONDS });
             const response = new Response(JSON.stringify({ success: true }), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
-            const authValue = await MD5MD5(UA + secretKey + adminPassword);
-            response.headers.set('Set-Cookie', `auth=${authValue}; Path=/; Max-Age=86400; HttpOnly`);
+            response.headers.set('Set-Cookie', `auth=${authValue}; Path=/; Max-Age=${SESSION_TTL_SECONDS}; HttpOnly; Secure; SameSite=Strict`);
             return response;
         }
     }
     return fetch('https://edt-pages.github.io/login');
 }
 
-export async function handleLogout() {
+export async function handleLogout(request, env) {
+    const authCookie = getCookie(request, 'auth');
+    if (authCookie && env.KV?.delete) {
+        await env.KV.delete(await sessionKey(authCookie));
+    }
     const response = new Response('Redirecting...', { status: 302, headers: { 'Location': '/login' } });
-    response.headers.set('Set-Cookie', 'auth=; Path=/; Max-Age=0; HttpOnly');
+    response.headers.set('Set-Cookie', 'auth=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict');
     return response;
 }

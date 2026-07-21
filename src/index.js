@@ -67,15 +67,15 @@ export default {
                 return new Response('Redir...', { status: 302, headers: { 'Location': `/sub?${params.toString()}` } });
             }
             if (pathLower === 'login') {
-                const auth = await checkAuth(request, env, { UUID: userID });
+                const auth = await checkAuth(request, env);
                 if (auth) return new Response('Redir...', { status: 302, headers: { 'Location': '/admin' } });
                 return handleLogin(request, env);
             }
             if (pathLower === 'logout' || uuidRegex.test(path)) {
-                return handleLogout();
+                return handleLogout(request, env);
             }
             if (pathLower === 'admin' || pathLower.startsWith('admin/')) {
-                const auth = await checkAuth(request, env, { UUID: userID });
+                const auth = await checkAuth(request, env);
                 if (!auth) return new Response('Redir...', { status: 302, headers: { 'Location': '/login' } });
                 const config = await readConfig(env, url.hostname, userID, path);
                 return handleAdmin(request, env, config, pathLower);
