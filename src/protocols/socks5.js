@@ -1,6 +1,8 @@
 import { connect } from "cloudflare:sockets";
+import { isSafeConnectTarget } from '../utils/helpers.js';
 
 export async function socks5Connect(targetHost, targetPort, initialData, parsedSocks5Address) {
+    if (!isSafeConnectTarget(targetHost, targetPort)) throw new Error('Invalid proxy target');
     const { username, password, hostname, port } = parsedSocks5Address;
     const socket = connect({ hostname, port });
     const writer = socket.writable.getWriter();
@@ -40,6 +42,7 @@ export async function socks5Connect(targetHost, targetPort, initialData, parsedS
 }
 
 export async function httpConnect(targetHost, targetPort, initialData, parsedSocks5Address) {
+    if (!isSafeConnectTarget(targetHost, targetPort)) throw new Error('Invalid proxy target');
     const { username, password, hostname, port } = parsedSocks5Address;
     const socket = connect({ hostname, port });
     const writer = socket.writable.getWriter();

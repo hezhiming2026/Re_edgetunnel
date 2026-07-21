@@ -29,6 +29,11 @@ export function base64ToArray(b64Str) {
     }
 }
 
+export function isSafeConnectTarget(hostname, port) {
+    return typeof hostname === 'string' && hostname.length > 0 && hostname.length <= 255 &&
+        !/[\r\n\0\s]/.test(hostname) && Number.isInteger(port) && port > 0 && port <= 65535;
+}
+
 export function isValidBase64(str) {
     if (typeof str !== 'string') return false;
     const cleanStr = str.replace(/\s/g, '');

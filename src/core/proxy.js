@@ -5,6 +5,28 @@ import { socks5Connect, httpConnect } from "../protocols/socks5.js";
 import { base64ToArray, getSocks5Account } from "../utils/helpers.js";
 import { parseProxyAddress } from "../utils/ip.js";
 
+const CONNECT_TIMEOUT_MS = 10_000;
+const IDLE_TIMEOUT_MS = 5 * 60_000;
+const MAX_SESSION_MS = 60 * 60_000;
+const MAX_INITIAL_REQUEST_BYTES = 8192;
+
+async function connectWithTimeout(options) {
+    const socket = connect(options);
+    let timeoutId;
+    try {
+        await Promise.race([
+            socket.opened,
+            new Promise((_, reject) => { timeoutId = setTimeout(() => reject(new Error('TCP connection timed out')), CONNECT_TIMEOUT_MS); }),
+        ]);
+        return socket;
+    } catch (error) {
+        try { socket.close(); } catch { }
+        throw error;
+    } finally {
+        clearTimeout(timeoutId);
+    }
+}
+
 function closeSocketQuietly(socket) {
     try {
         if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CLOSING) {
@@ -80,8 +102,9 @@ async function connectStreams(remoteSocket, webSocket, headerData, retryFunc) {
 }
 
 async function forwardDataUDP(udpChunk, webSocket, respHeader) {
+    let tcpSocket;
     try {
-        const tcpSocket = connect({ hostname: '8.8.4.4', port: 53 });
+        tcpSocket = await connectWithTimeout({ hostname: '8.8.4.4', port: 53 });
         let vlessHeader = respHeader;
         const writer = tcpSocket.writable.getWriter();
         await writer.write(udpChunk);
@@ -103,6 +126,8 @@ async function forwardDataUDP(udpChunk, webSocket, respHeader) {
         }));
     } catch (error) {
         // console.error('UDP forward error:', error);
+    } finally {
+        try { tcpSocket?.close(); } catch { }
     }
 }
 
@@ -135,11 +160,7 @@ async function forwardDataTCP(host, portNum, rawData, ws, respHeader, remoteConn
                 const [pAddr, pPort] = proxyList[idx];
                 try {
                     // console.log(`[反代连接] ...`);
-                    remoteSock = connect({ hostname: pAddr, port: pPort });
-                    await Promise.race([
-                        remoteSock.opened,
-                        new Promise((_, reject) => setTimeout(() => reject(new Error('连接超时')), 1000))
-                    ]);
+                    remoteSock = await connectWithTimeout({ hostname: pAddr, port: pPort });
                     const testWriter = remoteSock.writable.getWriter();
                     await testWriter.write(data);
                     testWriter.releaseLock();
@@ -153,7 +174,7 @@ async function forwardDataTCP(host, portNum, rawData, ws, respHeader, remoteConn
         }
 
         if (useFallback) {
-            remoteSock = connect({ hostname: address, port: port });
+            remoteSock = await connectWithTimeout({ hostname: address, port: port });
             const writer = remoteSock.writable.getWriter();
             await writer.write(data);
             writer.releaseLock();
@@ -205,9 +226,26 @@ export async function handleWSRequest(request, yourUUID, proxyConfig) {
     const earlyData = request.headers.get('sec-websocket-protocol') || '';
     const readable = makeReadableStr(serverSock, earlyData);
     let isTrojan = null;
+    let idleTimer;
+    const closeSession = () => {
+        try { remoteConnWrapper.socket?.close(); } catch { }
+        closeSocketQuietly(serverSock);
+    };
+    const resetIdleTimer = () => {
+        clearTimeout(idleTimer);
+        idleTimer = setTimeout(closeSession, IDLE_TIMEOUT_MS);
+    };
+    const maxSessionTimer = setTimeout(closeSession, MAX_SESSION_MS);
+    serverSock.addEventListener('close', () => {
+        clearTimeout(idleTimer);
+        clearTimeout(maxSessionTimer);
+        try { remoteConnWrapper.socket?.close(); } catch { }
+    });
+    resetIdleTimer();
 
     readable.pipeTo(new WritableStream({
         async write(chunk) {
+            resetIdleTimer();
             if (isDnsQuery) return await forwardDataUDP(chunk, serverSock, null);
             if (remoteConnWrapper.socket) {
                 const writer = remoteConnWrapper.socket.writable.getWriter();
@@ -218,6 +256,10 @@ export async function handleWSRequest(request, yourUUID, proxyConfig) {
 
             if (isTrojan === null) {
                 const bytes = new Uint8Array(chunk);
+                if (bytes.byteLength > MAX_INITIAL_REQUEST_BYTES) {
+                    closeSession();
+                    return;
+                }
                 isTrojan = bytes.byteLength >= 58 && bytes[56] === 0x0d && bytes[57] === 0x0a;
             }
 
@@ -231,7 +273,7 @@ export async function handleWSRequest(request, yourUUID, proxyConfig) {
             if (isTrojan) {
                 const { port, hostname, rawClientData, hasError, message } = parseTrojanRequest(chunk, yourUUID);
                 if (hasError) {
-                    // console.error(message); 
+                    closeSession();
                     return;
                 }
                 if (isSpeedTestSite(hostname)) return; // silently block?
@@ -239,7 +281,7 @@ export async function handleWSRequest(request, yourUUID, proxyConfig) {
             } else {
                 const { port, hostname, rawIndex, version, isUDP, hasError, message } = parseVlessRequest(chunk, yourUUID);
                 if (hasError) {
-                    // console.error(message);
+                    closeSession();
                     return;
                 }
                 if (isSpeedTestSite(hostname)) return;
