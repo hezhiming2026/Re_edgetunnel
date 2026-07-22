@@ -45,7 +45,7 @@ export function parseVlessRequest(chunk, token) {
 
 export function parseTrojanRequest(buffer, passwordPlainText) {
     const sha224Password = sha224(passwordPlainText);
-    if (buffer.byteLength < 56) return { hasError: true, message: "invalid data" };
+    if (buffer.byteLength < 58) return { hasError: true, message: "invalid data" };
     let crLfIndex = 56;
     if (new Uint8Array(buffer.slice(56, 57))[0] !== 0x0d || new Uint8Array(buffer.slice(57, 58))[0] !== 0x0a) return { hasError: true, message: "invalid header format" };
     const password = new TextDecoder().decode(buffer.slice(0, crLfIndex));
@@ -98,6 +98,10 @@ export function parseTrojanRequest(buffer, passwordPlainText) {
     const portBuffer = socks5DataBuffer.slice(portIndex, portIndex + 2);
     const portRemote = new DataView(portBuffer).getUint16(0);
     if (portRemote === 0) return { hasError: true, message: 'invalid port' };
+    const trailingCrLf = new Uint8Array(socks5DataBuffer.slice(portIndex + 2, portIndex + 4));
+    if (trailingCrLf.length !== 2 || trailingCrLf[0] !== 0x0d || trailingCrLf[1] !== 0x0a) {
+        return { hasError: true, message: 'invalid request terminator' };
+    }
 
     return {
         hasError: false,

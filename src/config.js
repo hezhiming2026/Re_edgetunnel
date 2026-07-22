@@ -1,5 +1,5 @@
 
-import { MD5MD5, maskSensitiveInfo, formatIdentifier } from './utils/helpers.js';
+import { MD5MD5, maskSensitiveInfo, buildProxyUri, normalizeProxyProtocol } from './utils/helpers.js';
 import { generateRandomIP, organizeToArray, getCloudflareUsage } from './utils/ip.js';
 
 export async function readConfig(env, hostname, userID, path, reset = false) {
@@ -14,6 +14,7 @@ export async function readConfig(env, hostname, userID, path, reset = false) {
         HOSTS: [hostname],
         UUID: userID,
         协议类型: "vless",
+        支持协议: ["vless", "trojan"],
         传输协议: "ws",
         跳过证书验证: false,
         启用0RTT: false,
@@ -43,13 +44,14 @@ export async function readConfig(env, hostname, userID, path, reset = false) {
             SUBEMOJI: false,
         },
         本地规则集URL: null,
+        客户端DNS: [],
         反代: {
-            PROXYIP: "auto",
+            PROXYIP: null,
             SOCKS5: {
                 启用: null, // Will be set later based on parsing
                 全局: false,
                 账号: '',
-                白名单: ['*tapecontent.net', '*cloudatacdn.com', '*loadshare.org', '*cdn-centaurus.com', 'scholar.google.com'],
+                白名单: [],
             },
         },
         TG: {
@@ -92,6 +94,9 @@ export async function readConfig(env, hostname, userID, path, reset = false) {
     if (!config_JSON.HOSTS) config_JSON.HOSTS = [hostname];
     if (env.HOST) config_JSON.HOSTS = (await organizeToArray(env.HOST)).map(h => h.toLowerCase().replace(/^https?:\/\//, '').split('/')[0].split(':')[0]);
     config_JSON.UUID = userID;
+    config_JSON.协议类型 = normalizeProxyProtocol(config_JSON.协议类型);
+    config_JSON.支持协议 = ["vless", "trojan"];
+    if (!Array.isArray(config_JSON.客户端DNS)) config_JSON.客户端DNS = [];
     if (!config_JSON.随机路径) config_JSON.随机路径 = false;
     if (!config_JSON.启用0RTT) config_JSON.启用0RTT = false;
 
@@ -99,6 +104,8 @@ export async function readConfig(env, hostname, userID, path, reset = false) {
     // but here we try to replicate logic.
     // However, the original code passes 'path' (from url) into this function.
     // Logic for setting config_JSON.PATH:
+    if (!config_JSON.反代) config_JSON.反代 = structuredClone(defaultConfig.反代);
+    if (config_JSON.反代.PROXYIP === 'auto') config_JSON.反代.PROXYIP = null;
     if (!config_JSON.反代.SOCKS5) config_JSON.反代.SOCKS5 = defaultConfig.反代.SOCKS5;
 
     // Note: The caller should have updated config_JSON.反代.SOCKS5 with runtime values if any (from URL params)
@@ -107,16 +114,28 @@ export async function readConfig(env, hostname, userID, path, reset = false) {
     // Then `反代参数获取` (Get Proxy Params) is called *before* logic that might use config but `读取config_JSON` itself relies on some defaults.
 
     // Simplification: logic for PATH calculation
-    config_JSON.PATH = path ? (path.startsWith('/') ? path : '/' + path) : (config_JSON.反代.SOCKS5.启用 ? ('/' + config_JSON.反代.SOCKS5.启用 + (config_JSON.反代.SOCKS5.全局 ? '://' : '=') + config_JSON.反代.SOCKS5.账号) : (config_JSON.反代.PROXYIP === 'auto' ? '/' : `/proxyip=${config_JSON.反代.PROXYIP}`));
+    config_JSON.PATH = path ? (path.startsWith('/') ? path : '/' + path) : (config_JSON.反代.SOCKS5.启用 ? ('/' + config_JSON.反代.SOCKS5.启用 + (config_JSON.反代.SOCKS5.全局 ? '://' : '=') + config_JSON.反代.SOCKS5.账号) : (config_JSON.反代.PROXYIP ? `/proxyip=${config_JSON.反代.PROXYIP}` : '/'));
 
     if (!config_JSON.TLS分片 && config_JSON.TLS分片 !== null) config_JSON.TLS分片 = null;
-    const TLSFragParam = config_JSON.TLS分片 == 'Shadowrocket' ? `&fragment=${encodeURIComponent('1,40-60,30-50,tlshello')}` : config_JSON.TLS分片 == 'Happ' ? `&fragment=${encodeURIComponent('3,1,tlshello')}` : '';
+    const TLSFragment = config_JSON.TLS分片 == 'Shadowrocket' ? '1,40-60,30-50,tlshello' : config_JSON.TLS分片 == 'Happ' ? '3,1,tlshello' : null;
     if (!config_JSON.Fingerprint) config_JSON.Fingerprint = "chrome";
     if (!config_JSON.ECH) config_JSON.ECH = false;
     if (!config_JSON.ECHConfig) config_JSON.ECHConfig = { DNS: CM_DoH, SNI: null };
-    const ECHParam = config_JSON.ECH && config_JSON.ECHConfig?.DNS ? `&ech=${encodeURIComponent((config_JSON.ECHConfig.SNI ? config_JSON.ECHConfig.SNI + '+' : '') + config_JSON.ECHConfig.DNS)}` : '';
+    const ECHValue = config_JSON.ECH && config_JSON.ECHConfig?.DNS ? (config_JSON.ECHConfig.SNI ? config_JSON.ECHConfig.SNI + '+' : '') + config_JSON.ECHConfig.DNS : null;
 
-    config_JSON.LINK = `${config_JSON.协议类型}://${userID}@${host}:443?security=tls&type=${config_JSON.传输协议 + ECHParam}&host=${host}&fp=${config_JSON.Fingerprint}&sni=${host}&path=${encodeURIComponent(config_JSON.启用0RTT ? config_JSON.PATH + '?ed=2560' : config_JSON.PATH) + TLSFragParam}&encryption=none${config_JSON.跳过证书验证 ? '&insecure=1&allowInsecure=1' : ''}#${encodeURIComponent(config_JSON.优选订阅生成.SUBNAME)}`;
+    config_JSON.LINK = buildProxyUri({
+        protocol: config_JSON.协议类型,
+        credential: userID,
+        address: host,
+        host,
+        transport: config_JSON.传输协议,
+        path: config_JSON.启用0RTT ? config_JSON.PATH + '?ed=2560' : config_JSON.PATH,
+        fingerprint: config_JSON.Fingerprint,
+        name: config_JSON.优选订阅生成.SUBNAME,
+        skipCertificateVerification: config_JSON.跳过证书验证,
+        ech: ECHValue,
+        fragment: TLSFragment,
+    });
     config_JSON.优选订阅生成.TOKEN = await MD5MD5(hostname + userID);
 
     // Load TG config

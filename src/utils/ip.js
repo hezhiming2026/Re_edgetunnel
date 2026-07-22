@@ -1,14 +1,30 @@
 import { isValidBase64, base64Decode } from './helpers.js';
 
-let cachedProxyIP = null;
-let cachedProxyList = null;
-
 export async function organizeToArray(content) {
     var replaced = content.replace(/[	"'\r\n]+/g, ',').replace(/,+/g, ',');
     if (replaced.charAt(0) == ',') replaced = replaced.slice(1);
     if (replaced.charAt(replaced.length - 1) == ',') replaced = replaced.slice(0, replaced.length - 1);
     const addressArray = replaced.split(',');
     return addressArray;
+}
+
+const LOCAL_ADDRESS_PATTERN = /^(\[[\da-fA-F:]+\]|[\d.]+|[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?)*)(?::(\d+))?(?:#(.+))?$/;
+
+export function parseLocalAddressEntry(input, defaultPort = 443) {
+    if (typeof input !== 'string' || input.length > 512) return null;
+    const match = input.trim().match(LOCAL_ADDRESS_PATTERN);
+    if (!match) return null;
+    const port = match[2] ? Number(match[2]) : Number(defaultPort);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+    return { address: match[1], port, name: match[3] || match[1] };
+}
+
+export function parseLocalAddressList(content, defaultPort = 443, maxEntries = 4096) {
+    if (typeof content !== 'string' || !content.trim() || content.trim() === 'null') return [];
+    return content.split(/\r?\n/)
+        .map((line) => parseLocalAddressEntry(line, defaultPort))
+        .filter(Boolean)
+        .slice(0, maxEntries);
 }
 
 export async function generateRandomIP(request, count = 16, designatedPort = -1) {
@@ -198,88 +214,26 @@ export async function getCloudflareUsage(Email, GlobalAPIKey, AccountID, APIToke
     }
 }
 
-export async function parseProxyAddress(proxyIP, targetDomain = 'dash.cloudflare.com', UUID = '00000000-0000-4000-8000-000000000000') {
-    if (!cachedProxyIP || !cachedProxyList || cachedProxyIP !== proxyIP) {
-        proxyIP = proxyIP.toLowerCase();
-        async function DoHQuery(domain, type) {
-            try {
-                const response = await fetch(`https://1.1.1.1/dns-query?name=${domain}&type=${type}`, {
-                    headers: { 'Accept': 'application/dns-json' }
-                });
-                if (!response.ok) return [];
-                const data = await response.json();
-                return data.Answer || [];
-            } catch (error) {
-                console.error(`DoH查询失败 (${type}):`, error);
-                return [];
-            }
-        }
+export async function parseProxyAddress(proxyAddress) {
+    if (typeof proxyAddress !== 'string' || !proxyAddress.trim()) return [];
+    const value = proxyAddress.trim().toLowerCase();
+    let hostname = value;
+    let port = 443;
 
-        function parseAddrPort(str) {
-            let addr = str, port = 443;
-            if (str.includes(']:')) {
-                const parts = str.split(']:');
-                addr = parts[0] + ']';
-                port = parseInt(parts[1], 10) || port;
-            } else if (str.includes(':') && !str.startsWith('[')) {
-                const colonIndex = str.lastIndexOf(':');
-                addr = str.slice(0, colonIndex);
-                port = parseInt(str.slice(colonIndex + 1), 10) || port;
-            }
-            return [addr, port];
-        }
+    if (value.startsWith('[')) {
+        const match = value.match(/^(\[[0-9a-f:]+\])(?::(\d+))?$/i);
+        if (!match) return [];
+        hostname = match[1];
+        port = match[2] ? Number(match[2]) : port;
+    } else {
+        const match = value.match(/^([^:]+)(?::(\d+))?$/);
+        if (!match) return [];
+        hostname = match[1];
+        port = match[2] ? Number(match[2]) : port;
+    }
 
-        let proxyList = [];
-
-        if (proxyIP.includes('.william')) {
-            try {
-                const txtRecords = await DoHQuery(proxyIP, 'TXT');
-                const txtData = txtRecords.filter(r => r.type === 16).map(r => r.data);
-                if (txtData.length > 0) {
-                    let data = txtData[0];
-                    if (data.startsWith('"') && data.endsWith('"')) data = data.slice(1, -1);
-                    const prefixes = data.replace(/\\010/g, ',').replace(/\n/g, ',').split(',').map(s => s.trim()).filter(Boolean);
-                    proxyList = prefixes.map(prefix => parseAddrPort(prefix));
-                }
-            } catch (error) {
-                console.error('解析William域名失败:', error);
-            }
-        } else {
-            let [addr, port] = parseAddrPort(proxyIP);
-
-            if (proxyIP.includes('.tp')) {
-                const tpMatch = proxyIP.match(/\.tp(\d+)/);
-                if (tpMatch) port = parseInt(tpMatch[1], 10);
-            }
-
-            const ipv4Regex = /^(25[0-5]|2[0-4]\d|[01]?\d\d?)\.(25[0-5]|2[0-4]\d|[01]?\d\d?)\.(25[0-5]|2[0-4]\d|[01]?\d\d?)\.(25[0-5]|2[0-4]\d|[01]?\d\d?)$/;
-            const ipv6Regex = /^\[?([a-fA-F0-9:]+)\]?$/;
-
-            if (!ipv4Regex.test(addr) && !ipv6Regex.test(addr)) {
-                const [aRecords, aaaaRecords] = await Promise.all([
-                    DoHQuery(addr, 'A'),
-                    DoHQuery(addr, 'AAAA')
-                ]);
-
-                const ipv4List = aRecords.filter(r => r.type === 1).map(r => r.data);
-                const ipv6List = aaaaRecords.filter(r => r.type === 28).map(r => `[${r.data}]`);
-                const ipAddresses = [...ipv4List, ...ipv6List];
-
-                proxyList = ipAddresses.length > 0
-                    ? ipAddresses.map(ip => [ip, port])
-                    : [[addr, port]];
-            } else {
-                proxyList = [[addr, port]];
-            }
-        }
-        const sortedList = proxyList.sort((a, b) => a[0].localeCompare(b[0]));
-        const rootDomain = targetDomain.includes('.') ? targetDomain.split('.').slice(-2).join('.') : targetDomain;
-        let randomSeed = [...(rootDomain + UUID)].reduce((a, c) => a + c.charCodeAt(0), 0);
-        console.log(`[反代解析] 随机种子: ${randomSeed}\n目标站点: ${rootDomain}`)
-        const shuffled = [...sortedList].sort(() => (randomSeed = (randomSeed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff - 0.5);
-        cachedProxyList = shuffled.slice(0, 8);
-        console.log(`[反代解析] 解析完成 总数: ${cachedProxyList.length}个\n${cachedProxyList.map(([ip, port], index) => `${index + 1}. ${ip}:${port}`).join('\n')}`);
-        cachedProxyIP = proxyIP;
-    } else console.log(`[反代解析] 读取缓存 总数: ${cachedProxyList.length}个\n${cachedProxyList.map(([ip, port], index) => `${index + 1}. ${ip}:${port}`).join('\n')}`);
-    return cachedProxyList;
+    if (!hostname || !Number.isInteger(port) || port < 1 || port > 65535) return [];
+    // cloudflare:sockets resolves operator-provided hostnames itself. Avoid a
+    // hidden DoH dependency and let the platform perform normal DNS lookup.
+    return [[hostname, port]];
 }

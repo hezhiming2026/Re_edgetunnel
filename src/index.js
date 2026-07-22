@@ -34,9 +34,13 @@ export default {
                     socks5Type: null,
                     socks5Account: '',
                     socks5Global: false,
-                    socks5Whitelist: ['*tapecontent.net', 'scholar.google.com'],
+                    socks5Whitelist: [],
                     cachedProxyIndexRef: { value: 0 },
-                    enableProxyFallback: Boolean(env.PROXYIP)
+                    enableProxyFallback: Boolean(env.PROXYIP),
+                    dnsResolver: env.DNS_RESOLVER ? {
+                        hostname: env.DNS_RESOLVER,
+                        port: Number(env.DNS_RESOLVER_PORT || 53),
+                    } : null,
                 };
 
                 const proxyMatch = pathLower.match(/\/(proxyip[.=]|pyip=|ip=)(.+)/);
@@ -85,10 +89,19 @@ export default {
                     return new Response(JSON.stringify({ success: false, msg: 'Invalid Token' }), { status: 403, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
                 }
                 const config = await readConfig(env, url.hostname, userID, path);
-                return handleSub(request, env, config);
+                return handleSub(request, env, config, ctx);
             }
             if (pathLower === 'locations') {
-                return fetch('https://speed.cloudflare.com/locations');
+                if (!env.LOCATIONS_API) {
+                    return new Response('Location data is disabled. Configure an operator-owned LOCATIONS_API to enable it.', { status: 501 });
+                }
+                try {
+                    const locationsUrl = new URL(env.LOCATIONS_API);
+                    if (locationsUrl.protocol !== 'https:' || locationsUrl.username || locationsUrl.password) throw new Error('invalid endpoint');
+                    return fetch(locationsUrl, { headers: { Accept: 'application/json' } });
+                } catch {
+                    return new Response('Invalid LOCATIONS_API configuration.', { status: 500 });
+                }
             }
             if (pathLower === 'robots.txt') return new Response('User-agent: *\nDisallow: /');
         } else if (!envUUID) {

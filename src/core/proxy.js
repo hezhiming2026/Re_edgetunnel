@@ -2,7 +2,7 @@
 import { connect } from "cloudflare:sockets";
 import { parseVlessRequest, parseTrojanRequest } from "../protocols/parsers.js";
 import { socks5Connect, httpConnect } from "../protocols/socks5.js";
-import { base64ToArray, getSocks5Account } from "../utils/helpers.js";
+import { base64ToArray, getSocks5Account, isSafeConnectTarget } from "../utils/helpers.js";
 import { parseProxyAddress } from "../utils/ip.js";
 
 const CONNECT_TIMEOUT_MS = 10_000;
@@ -36,7 +36,7 @@ function closeSocketQuietly(socket) {
 }
 
 function isSpeedTestSite(hostname) {
-    const speedTestDomains = [atob('c3BlZWQuY2xvdWRmbGFyZS5jb20=')];
+    const speedTestDomains = ['speed.cloudflare.com'];
     if (speedTestDomains.includes(hostname)) {
         return true;
     }
@@ -101,10 +101,11 @@ async function connectStreams(remoteSocket, webSocket, headerData, retryFunc) {
     }
 }
 
-async function forwardDataUDP(udpChunk, webSocket, respHeader) {
+async function forwardDataUDP(udpChunk, webSocket, respHeader, dnsResolver) {
     let tcpSocket;
     try {
-        tcpSocket = await connectWithTimeout({ hostname: '8.8.4.4', port: 53 });
+        if (!dnsResolver || !isSafeConnectTarget(dnsResolver.hostname, dnsResolver.port)) throw new Error('DNS resolver is not configured');
+        tcpSocket = await connectWithTimeout({ hostname: dnsResolver.hostname.replace(/^\[|\]$/g, ''), port: dnsResolver.port });
         let vlessHeader = respHeader;
         const writer = tcpSocket.writable.getWriter();
         await writer.write(udpChunk);
@@ -200,7 +201,7 @@ async function forwardDataTCP(host, portNum, rawData, ws, respHeader, remoteConn
         }
         remoteConnWrapper.socket = newSocket;
         newSocket.closed.catch(() => { }).finally(() => closeSocketQuietly(ws));
-        connectStreams(newSocket, ws, respHeader, null);
+        void connectStreams(newSocket, ws, respHeader, null).catch(() => closeSocketQuietly(ws));
     }
 
     const checkSocks5Whitelist = (addr) => socks5Whitelist.some(p => new RegExp(`^${p.replace(/\*/g, '.*')}$`, 'i').test(addr));
@@ -211,7 +212,7 @@ async function forwardDataTCP(host, portNum, rawData, ws, respHeader, remoteConn
         try {
             const initialSocket = await connectDirect(host, portNum, rawData);
             remoteConnWrapper.socket = initialSocket;
-            connectStreams(initialSocket, ws, respHeader, proxyIP ? connectToProxy : null);
+            void connectStreams(initialSocket, ws, respHeader, proxyIP ? connectToProxy : null).catch(() => closeSocketQuietly(ws));
         } catch (err) {
             if (!proxyIP) {
                 console.warn(`TCP connection failed: ${err.message}`);
@@ -237,6 +238,7 @@ export async function handleWSRequest(request, yourUUID, proxyConfig) {
     serverSock.accept();
     let remoteConnWrapper = { socket: null };
     let isDnsQuery = false;
+    const dnsResolver = proxyConfig.dnsResolver || null;
     const earlyData = request.headers.get('sec-websocket-protocol') || '';
     const readable = makeReadableStr(serverSock, earlyData);
     let isTrojan = null;
@@ -260,7 +262,7 @@ export async function handleWSRequest(request, yourUUID, proxyConfig) {
     readable.pipeTo(new WritableStream({
         async write(chunk) {
             resetIdleTimer();
-            if (isDnsQuery) return await forwardDataUDP(chunk, serverSock, null);
+            if (isDnsQuery) return await forwardDataUDP(chunk, serverSock, null, dnsResolver);
             if (remoteConnWrapper.socket) {
                 const writer = remoteConnWrapper.socket.writable.getWriter();
                 await writer.write(chunk);
@@ -300,12 +302,15 @@ export async function handleWSRequest(request, yourUUID, proxyConfig) {
                 }
                 if (isSpeedTestSite(hostname)) return;
                 if (isUDP) {
-                    if (port === 53) isDnsQuery = true;
-                    else return; // throw new Error('UDP not supported');
+                    if (port === 53 && dnsResolver) isDnsQuery = true;
+                    else {
+                        closeSession();
+                        return;
+                    }
                 }
                 const respHeader = new Uint8Array([version[0], 0]);
                 const rawData = chunk.slice(rawIndex);
-                if (isDnsQuery) return forwardDataUDP(rawData, serverSock, respHeader);
+                if (isDnsQuery) return forwardDataUDP(rawData, serverSock, respHeader, dnsResolver);
                 await forwardDataTCP(hostname, port, rawData, serverSock, respHeader, remoteConnWrapper, yourUUID, proxyConfig);
             }
         },

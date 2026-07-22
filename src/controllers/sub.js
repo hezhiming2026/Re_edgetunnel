@@ -1,6 +1,6 @@
 
-import { MD5MD5, batchReplaceDomain } from "../utils/helpers.js";
-import { generateRandomIP } from "../utils/ip.js";
+import { MD5MD5, batchReplaceDomain, buildProxyUri, normalizeProxyProtocol } from "../utils/helpers.js";
+import { generateRandomIP, parseLocalAddressList } from "../utils/ip.js";
 import { SingboxPatch, ClashPatch, SurgePatch } from "../utils/patches.js";
 import { logRequest } from "../config.js";
 
@@ -25,7 +25,7 @@ async function getECH(host, dohUrl) {
     } catch { return ''; }
 }
 
-export async function handleSub(request, env, config) {
+export async function handleSub(request, env, config, ctx) {
     const url = new URL(request.url);
     const host = config.HOST;
     const userID = config.UUID;
@@ -36,11 +36,7 @@ export async function handleSub(request, env, config) {
         return new Response(JSON.stringify({ success: false, msg: "Invalid Token" }), { status: 403 });
     }
 
-    // Log request
-    // Note: We don't have ctx here directly unless passed. 
-    // Usually logRequest returns a promise, better be awaited or passed ctx to waitUntil.
-    // For now we fire and forget (no await).
-    if (env.KV) logRequest(env, request, request.headers.get('CF-Connecting-IP') || 'Unknown', 'Get_SUB', config);
+    if (env.KV) ctx.waitUntil(logRequest(env, request, request.headers.get('CF-Connecting-IP') || 'Unknown', 'Get_SUB', config));
 
     const ua = (request.headers.get('User-Agent') || '').toLowerCase();
     const expire = 4102329600;
@@ -61,27 +57,38 @@ export async function handleSub(request, env, config) {
                         (url.searchParams.has('loon') || ua.includes('loon') ? 'loon' : 'mixed')))));
 
     if (!ua.includes('mozilla')) responseHeaders["Content-Disposition"] = `attachment; filename*=utf-8''${encodeURIComponent(config.优选订阅生成.SUBNAME)}`;
-    const protocolType = (url.searchParams.has('surge') || ua.includes('surge')) ? 'trojan' : config.协议类型;
+    const protocolType = (url.searchParams.has('surge') || ua.includes('surge')) ? 'trojan' : normalizeProxyProtocol(config.协议类型);
 
     let content = '';
 
     if (type === 'mixed') {
         let links = '';
         const path = config.启用0RTT ? config.PATH + '?ed=2560' : config.PATH;
-        const tlsFrag = config.TLS分片 == 'Shadowrocket' ? `&fragment=${encodeURIComponent('1,40-60,30-50,tlshello')}` : config.TLS分片 == 'Happ' ? `&fragment=${encodeURIComponent('3,1,tlshello')}` : '';
-        const echParam = config.ECH && config.ECHConfig?.DNS ? `&ech=${encodeURIComponent((config.ECHConfig.SNI ? config.ECHConfig.SNI + '+' : '') + config.ECHConfig.DNS)}` : '';
+        const tlsFragment = config.TLS分片 == 'Shadowrocket' ? '1,40-60,30-50,tlshello' : config.TLS分片 == 'Happ' ? '3,1,tlshello' : null;
+        const echValue = config.ECH && config.ECHConfig?.DNS ? (config.ECHConfig.SNI ? config.ECHConfig.SNI + '+' : '') + config.ECHConfig.DNS : null;
 
         if (config.优选订阅生成.local) {
-            const [ipsArr, _] = await generateRandomIP(request, config.优选订阅生成.本地IP库.随机数量, config.优选订阅生成.本地IP库.指定端口);
-            // ipsArr is array of strings "ip:port#remark"
-            // Simplified generation:
-            links = ipsArr.map(ipStr => {
-                const match = ipStr.match(/^(\[[\da-fA-F:]+\]|[\d.]+|[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?)*)(?::(\d+))?(?:#(.+))?$/);
-                if (!match) return '';
-                const addr = match[1];
-                const port = match[2] || '443';
-                const remark = match[3] || addr;
-                return `${protocolType}://00000000-0000-4000-8000-000000000000@${addr}:${port}?security=tls&type=${config.传输协议 + echParam}&host=${host}&fp=${config.Fingerprint}&sni=${host}&path=${encodeURIComponent(config.随机路径 ? '/' : path) + tlsFrag}&encryption=none${config.跳过证书验证 ? '&insecure=1&allowInsecure=1' : ''}#${encodeURIComponent(remark)}`;
+            const savedAddresses = parseLocalAddressList(await env.KV.get('ADD.txt'));
+            let addressEntries = savedAddresses;
+            if (!addressEntries.length) {
+                const [generatedAddresses] = await generateRandomIP(request, config.优选订阅生成.本地IP库.随机数量, config.优选订阅生成.本地IP库.指定端口);
+                addressEntries = parseLocalAddressList(generatedAddresses.join('\n'));
+            }
+            links = addressEntries.map(({ address, port, name }) => {
+                return buildProxyUri({
+                    protocol: protocolType,
+                    credential: '00000000-0000-4000-8000-000000000000',
+                    address,
+                    port,
+                    host,
+                    transport: config.传输协议,
+                    path: config.随机路径 ? '/' : path,
+                    fingerprint: config.Fingerprint,
+                    name,
+                    skipCertificateVerification: config.跳过证书验证,
+                    ech: echValue,
+                    fragment: tlsFragment,
+                });
             }).join('\n');
         } else {
             // Fetch from SUB
@@ -126,7 +133,7 @@ export async function handleSub(request, env, config) {
         content = SingboxPatch(content, config.UUID, config.Fingerprint, echVal, config.本地规则集URL);
         responseHeaders["content-type"] = 'application/json; charset=utf-8';
     } else if (type === 'clash') {
-        content = ClashPatch(content, config.UUID, config.ECH, config.HOSTS, config.ECHConfig.SNI, config.ECHConfig.DNS);
+        content = ClashPatch(content, config.UUID, config.ECH, config.HOSTS, config.ECHConfig.SNI, config.ECHConfig.DNS, config.客户端DNS);
         responseHeaders["content-type"] = 'application/x-yaml; charset=utf-8';
     }
 

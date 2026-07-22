@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { MD5MD5 } from '../src/utils/helpers.js';
+import { buildProxyUri, MD5MD5 } from '../src/utils/helpers.js';
 import { readConfig } from '../src/config.js';
 
 class MemoryKV {
@@ -18,4 +18,16 @@ test('default configuration initializes and never generates ech=null', async () 
     assert.match(config.LINK, /^vless:\/\//);
     assert.doesNotMatch(config.LINK, /ech=null/);
     assert.equal(config.跳过证书验证, false);
+    assert.deepEqual(config.支持协议, ['vless', 'trojan']);
+    assert.deepEqual(config.客户端DNS, []);
+});
+
+test('VLESS and Trojan links use protocol-appropriate parameters', () => {
+    const common = { credential: '00000000-0000-4000-8000-000000000000', address: 'edge.example', host: 'edge.example' };
+    const vless = buildProxyUri({ ...common, protocol: 'vless' });
+    const trojan = buildProxyUri({ ...common, protocol: 'trojan' });
+    assert.match(vless, /^vless:\/\//);
+    assert.match(vless, /encryption=none/);
+    assert.match(trojan, /^trojan:\/\//);
+    assert.doesNotMatch(trojan, /encryption=/);
 });

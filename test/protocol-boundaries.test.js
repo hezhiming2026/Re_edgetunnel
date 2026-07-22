@@ -26,6 +26,17 @@ test('Trojan parser rejects a truncated address without throwing', () => {
     assert.equal(parseTrojanRequest(request.buffer, 'secret').hasError, true);
 });
 
+test('Trojan parser requires the CRLF request terminator', () => {
+    const host = new TextEncoder().encode('example.com');
+    const request = new Uint8Array([
+        ...new TextEncoder().encode(sha224('secret')), 0x0d, 0x0a,
+        1, 3, host.length, ...host, 0x01, 0xbb, 0, 0,
+    ]);
+    const result = parseTrojanRequest(request.buffer, 'secret');
+    assert.equal(result.hasError, true);
+    assert.equal(result.message, 'invalid request terminator');
+});
+
 test('HTTP CONNECT targets cannot inject headers', () => {
     assert.equal(isSafeConnectTarget('example.com', 443), true);
     assert.equal(isSafeConnectTarget('example.com\r\nX-Injected: yes', 443), false);

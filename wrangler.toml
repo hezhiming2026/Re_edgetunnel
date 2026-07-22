@@ -2,6 +2,12 @@ name = "edgetunnel"
 main = "src/index.js"
 compatibility_date = "2026-07-21"
 
+[observability]
+enabled = true
+
+[observability.logs]
+head_sampling_rate = 0.1
+
 # [Routes]
 # Uncomment and replace with your own domain
 # routes = [
@@ -9,13 +15,24 @@ compatibility_date = "2026-07-21"
 # ]
 
 [vars]
-# [UUID]
-# Default: Auto-generated on first run.
-# You can set a fixed UUID here (Recommended for consistency).
+# [Admin password and RFC 4122 v4 protocol UUID]
+# ADMIN = "replace-with-a-strong-random-password"
 # UUID = "8a5ea040-33ff-4227-88bd-414bb865e59b"
 
 # [Proxy IP]
 # PROXYIP = "1.2.3.4"
+
+# [Operator-owned DNS for optional VLESS DNS forwarding]
+# DNS_RESOLVER = "dns.your-domain.com"
+# DNS_RESOLVER_PORT = "53"
+
+# [Operator-owned HTTP endpoint for SOCKS5/HTTP proxy checks]
+# PROXY_CHECK_HOST = "check.your-domain.com"
+# PROXY_CHECK_PORT = "80"
+# PROXY_CHECK_PATH = "/trace"
+
+# [Operator-owned HTTPS location data endpoint]
+# LOCATIONS_API = "https://locations.your-domain.com/locations.json"
 
 # [KV Namespace]
 # Run `npx wrangler kv namespace create edgetunnel` to get the ID

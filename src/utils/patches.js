@@ -1,6 +1,6 @@
 
 export function SingboxPatch(content, uuid, fingerprint, ech_config, ruleSetBaseUrl = null) {
-    const sb_json_text = content.replace('1.1.1.1', '8.8.8.8').replace('1.0.0.1', '8.8.4.4');
+    const sb_json_text = content;
     try {
         let config = JSON.parse(sb_json_text);
         if (Array.isArray(config.inbounds)) {
@@ -124,15 +124,18 @@ export function SingboxPatch(content, uuid, fingerprint, ech_config, ruleSetBase
     }
 }
 
-export function ClashPatch(content, uuid, ECH, HOSTS, ECH_SNI, ECH_DNS) {
+export function ClashPatch(content, uuid, ECH, HOSTS, ECH_SNI, ECH_DNS, clientDns = []) {
     let yaml = content.replace(/mode:\s*Rule\b/g, 'mode: rule');
-    const baseDns = `dns:\n  enable: true\n  default-nameserver:\n    - 223.5.5.5\n    - 119.29.29.29\n    - 114.114.114.114\n  use-hosts: true\n  nameserver:\n    - https://sm2.doh.pub/dns-query\n    - https://dns.alidns.com/dns-query\n  fallback:${ECH_DNS ? `\n    - ${ECH_DNS}` : ''}\n    - 8.8.4.4\n    - 208.67.220.220\n  fallback-filter:\n    geoip: true\n    domain: [+.google.com, +.facebook.com, +.youtube.com]\n    ipcidr:\n      - 240.0.0.0/4\n      - 0.0.0.0/32\n    geoip-code: CN\n`;
+    const cleanResolver = (value) => typeof value === 'string' && value.trim() && !/[\r\n]/.test(value) ? value.trim() : null;
+    const resolvers = [...new Set((Array.isArray(clientDns) ? clientDns : []).map(cleanResolver).filter(Boolean))];
+    const policyResolvers = [...new Set([cleanResolver(ECH_DNS), ...resolvers].filter(Boolean))];
+    const baseDns = resolvers.length ? `dns:\n  enable: true\n  use-hosts: true\n  nameserver:\n${resolvers.map((resolver) => `    - ${JSON.stringify(resolver)}`).join('\n')}\n` : '';
 
-    if (!/^dns:\s*(?:\n|$)/m.test(yaml)) yaml = baseDns + yaml;
+    if (baseDns && !/^dns:\s*(?:\n|$)/m.test(yaml)) yaml = baseDns + yaml;
 
     if (ECH_SNI && !HOSTS.includes(ECH_SNI)) HOSTS.push(ECH_SNI);
-    if (ECH && HOSTS.length > 0) {
-        const entries = HOSTS.map(host => `    "${host}":${ECH_DNS ? `\n      - ${ECH_DNS}` : ''}\n      - https://doh.cm.edu.kg/CMLiussss`).join('\n');
+    if (ECH && HOSTS.length > 0 && policyResolvers.length > 0) {
+        const entries = HOSTS.map(host => `    ${JSON.stringify(host)}:\n${policyResolvers.map((resolver) => `      - ${JSON.stringify(resolver)}`).join('\n')}`).join('\n');
         if (/^\s{2}nameserver-policy:\s*(?:\n|$)/m.test(yaml)) {
             yaml = yaml.replace(/^(\s{2}nameserver-policy:\s*\n)/m, `$1${entries}\n`);
         } else {

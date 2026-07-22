@@ -68,6 +68,30 @@ export function isSafeConnectTarget(hostname, port) {
         !/[\r\n\0\s]/.test(hostname) && Number.isInteger(port) && port > 0 && port <= 65535;
 }
 
+export function normalizeProxyProtocol(value) {
+    return String(value || '').toLowerCase() === 'trojan' ? 'trojan' : 'vless';
+}
+
+export function buildProxyUri({ protocol, credential, address, port = 443, host, transport = 'ws', path = '/', fingerprint = 'chrome', name = 'edgetunnel', skipCertificateVerification = false, ech = null, fragment = null }) {
+    const normalizedProtocol = normalizeProxyProtocol(protocol);
+    const params = new URLSearchParams({
+        security: 'tls',
+        type: transport,
+        host,
+        fp: fingerprint,
+        sni: host,
+        path,
+    });
+    if (normalizedProtocol === 'vless') params.set('encryption', 'none');
+    if (skipCertificateVerification) {
+        params.set('insecure', '1');
+        params.set('allowInsecure', '1');
+    }
+    if (ech) params.set('ech', ech);
+    if (fragment) params.set('fragment', fragment);
+    return `${normalizedProtocol}://${encodeURIComponent(credential)}@${address}:${port}?${params.toString()}#${encodeURIComponent(name)}`;
+}
+
 export function isValidBase64(str) {
     if (typeof str !== 'string') return false;
     const cleanStr = str.replace(/\s/g, '');
