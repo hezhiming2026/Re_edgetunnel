@@ -1,134 +1,546 @@
-# 🚀 EdgeTunnel (Refactored)
+# EdgeTunnel
 
-> **致敬与鸣谢**：
-> 本项目核心代理逻辑参考自开源社区的杰出贡献。特别感谢：
-> *   **cmliu** ([cmliu/edgetunnel](https://github.com/cmliu/edgetunnel)) - 原项目作者，提供了强大的面板与逻辑。
-> *   **zizifn** ([zizifn/edgetunnel](https://github.com/zizifn/edgetunnel)) - 早期版本的贡献者。
+<p align="center">
+  A self-hosted VLESS and Trojan over WebSocket tunnel for Cloudflare Workers.
+</p>
 
----
+<p align="center">
+  <a href="README.md">English</a> ·
+  <a href="README.zh-CN.md">简体中文</a> ·
+  <a href="README.es.md">Español</a> ·
+  <a href="README.fa.md">فارسی</a>
+</p>
 
-> **EdgeTunnel (Refactored)** 是一个全新构建的 Cloudflare Workers 隧道代理方案。
-> 它吸取了社区现有方案的设计思路，但采用**全模块化架构**从零重写，专为工程化部署和二次开发设计。
+<p align="center">
+  <img alt="Cloudflare Workers" src="https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white">
+  <img alt="Protocols" src="https://img.shields.io/badge/Protocols-VLESS%20%7C%20Trojan-2563EB">
+  <img alt="Runtime dependencies" src="https://img.shields.io/badge/Runtime_dependencies-operator_controlled-16A34A">
+  <img alt="License" src="https://img.shields.io/badge/License-see%20LICENSE-64748B">
+</p>
 
-![Status](https://img.shields.io/badge/Status-Active-success)
-![Author](https://img.shields.io/badge/Author-tianrking-blue)
+> [!IMPORTANT]
+> EdgeTunnel is intended for lawful research, learning, and access to systems you are authorized to use. You are responsible for complying with the laws, Cloudflare terms, and network policies that apply to you.
 
----
+## What this project is
 
-## 📖 项目简介
+EdgeTunnel is a modular Cloudflare Worker that accepts **VLESS over WebSocket/TLS** and **Trojan over WebSocket/TLS**, then opens outbound TCP connections with Cloudflare's Socket API. Configuration, login sessions, address lists, and request logs are stored in a Workers KV namespace that belongs to the operator.
 
-这是一个运行在 Cloudflare 边缘网络上的轻量级隧道代理工具。
+The runtime does not download code or an administrator panel from another GitHub repository or CDN. Optional remote services are disabled until the operator explicitly configures endpoints they control.
 
-本项目对原有的单文件脚本进行了**彻底重构**，采用现代化的 **ESM 模块标准**，支持 **Wrangler CLI** 一键部署、本地调试以及 Git 版本管理。
+### Current status
 
-它解耦了配置与核心逻辑，利用 **Cloudflare KV** 存储管理状态，并适配多种通信协议。旨在提供一个更符合工程化标准、易于扩展的 Serverless 网络编程范例，适合开发者学习 Worker 开发与 WebSocket 通信技术。
+| Area | Status |
+| --- | --- |
+| VLESS over WebSocket/TLS | Supported |
+| Trojan over WebSocket/TLS | Supported |
+| Outbound TCP through Cloudflare Sockets | Supported |
+| Password login, KV sessions, logout | Supported |
+| Token-protected subscriptions | Supported |
+| Local address-list subscription | Supported |
+| Mihomo/Clash, Sing-box, Surge conversion | Optional; requires an operator-owned converter |
+| Graphical administrator console | Not implemented yet; the current page exposes local JSON/text endpoints |
+| Native QUIC/UDP protocols such as Hysteria2 and TUIC | Not supported by this Worker architecture |
 
-### ✨ 核心特性
+> [!NOTE]
+> `/admin` is intentionally a small, self-contained page today. It does **not** contain a graphical node editor. This README explains how to retrieve and update the current configuration without relying on a third-party panel.
 
-- 🛡️ **协议支持**：支持 VLESS、Trojan 等主流协议。
-- 📦 **模块化设计**：代码拆分为 `src/` 目录，职责分离（配置、逻辑、控制器），易于维护。
-- 🛠 **工程化标准**：支持 `wrangler dev` 本地开发调试，告别在线编辑器的低效。
-- 🔄 **订阅系统**：自动生成订阅链接，适配 Clash, Sing-box, Surge 等。
-- ⚡ **性能优化**：利用 Cloudflare 全球边缘网络加速。
+## Architecture and trust boundary
 
----
-
-## 🛠 快速部署 (CLI)
-
-请完全按照以下步骤进行部署。
-
-### 1. 安装工具与登录
-确保已有 Node.js 环境。
-
-```bash
-# 安装 Wrangler
-npm install -g wrangler
-
-# 登录 Cloudflare (浏览器授权)
-npx wrangler login
+```mermaid
+flowchart LR
+    C["VLESS / Trojan client"] -->|"TLS + WebSocket"| W["Your Cloudflare Worker"]
+    A["Operator browser"] -->|"/login and /admin"| W
+    W --> K["Your Workers KV"]
+    W -->|"TCP Socket"| D["Requested destination"]
+    W -. "optional, explicitly configured" .-> O["Operator-owned DNS / converter / APIs"]
 ```
 
-### 2. 获取代码
+Required runtime services:
+
+- Cloudflare Workers.
+- One Workers KV namespace bound as `KV`.
+
+Optional integrations, all disabled by default:
+
+- An operator-owned DNS resolver for VLESS DNS forwarding.
+- An operator-owned subscription converter and conversion configuration.
+- An operator-owned proxy-check endpoint.
+- An operator-owned location-data endpoint.
+- An operator-selected HTTPS DoH endpoint when ECH is enabled.
+- Telegram notifications, a masquerade website, or a Cloudflare usage API.
+
+## Before you begin
+
+You need:
+
+- A Cloudflare account with Workers enabled.
+- Node.js and npm.
+- Git.
+- A terminal.
+
+Cloudflare recommends installing Wrangler locally in each project. The commands below use `npx`, so the project-local version is selected.
+
+## Complete deployment guide
+
+### 1. Clone the repository
+
 ```bash
 git clone https://github.com/tianrking/Re_edgetunnel.git
 cd Re_edgetunnel
 ```
 
-### 3. 配置 KV 存储
-创建一个 KV 命名空间用于存储配置：
+### 2. Install the current Wrangler CLI locally
 
 ```bash
-npx wrangler kv namespace create edgetunnel
+npm install --save-dev wrangler@latest
+npx wrangler --version
 ```
 
-记下终端输出的 `id` (例如 `095b6650...`)，然后打开 `wrangler.toml` 文件，修改 `[[kv_namespaces]]` 部分：
+Wrangler 4.x or newer is recommended.
+
+### 3. Sign in to Cloudflare
+
+```bash
+npx wrangler login
+npx wrangler whoami
+```
+
+The first command opens a browser authorization page. The second command confirms the active Cloudflare account.
+
+### 4. Create and bind a dedicated KV namespace
+
+Create a namespace:
+
+```bash
+npx wrangler kv namespace create KV
+```
+
+Wrangler prints an ID. Open `wrangler.toml` and replace the placeholder:
 
 ```toml
 [[kv_namespaces]]
 binding = "KV"
-id = "替换为你刚刚获取的ID"
+id = "paste-your-kv-namespace-id-here"
 ```
 
-### 4. 部署上线
+The binding name must remain exactly `KV`, because the Worker reads `env.KV`.
+
+Use a separate namespace for testing and production. Sharing a namespace also shares configuration, sessions, address lists, and logs.
+
+### 5. Validate and create the Worker
+
+Run the automated checks first:
+
+```bash
+npm test
+npm run check
+```
+
+Perform a deployment dry run, then deploy:
+
+```bash
+npx wrangler deploy --dry-run
+npx wrangler deploy
+```
+
+The first deployment creates the Worker. Until `ADMIN` is configured, HTTP requests intentionally return `503 Administrator password is not configured.`
+
+### 6. Set the administrator password as a Cloudflare Secret
+
+Generate a strong value locally if needed:
+
+```bash
+node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"
+```
+
+Store it interactively. Do not put the value in source code or `wrangler.toml`.
+
+```bash
+npx wrangler secret put ADMIN
+```
+
+Wrangler prompts for the value without requiring it in the command line. `secret put` creates and immediately deploys a new Worker version.
+
+### 7. Set a separate RFC 4122 version-4 UUID
+
+The UUID is the VLESS credential and is also used as the Trojan password. Generate one:
+
+```bash
+node -e "console.log(require('node:crypto').randomUUID())"
+```
+
+Store it as a secret:
+
+```bash
+npx wrangler secret put UUID
+```
+
+Use different values for `ADMIN` and `UUID`. Rotating `UUID` immediately invalidates old node links and subscriptions.
+
+Confirm that both secret names exist:
+
+```bash
+npx wrangler secret list
+```
+
+Cloudflare displays secret names, not their values.
+
+### 8. Open the deployed Worker
+
+Wrangler prints a URL similar to:
+
+```text
+https://edgetunnel.<your-workers-subdomain>.workers.dev
+```
+
+The root path normally displays an nginx-style camouflage page. This is expected. Open the login page instead:
+
+```text
+https://edgetunnel.<your-workers-subdomain>.workers.dev/login
+```
+
+Sign in with the `ADMIN` value, then open `/admin`.
+
+## First use: obtain a node and subscription
+
+### Obtain the single-node URI
+
+After logging in:
+
+1. Open `/admin`.
+2. Select **Configuration JSON**.
+3. Find the top-level `LINK` field.
+4. Copy the complete `vless://...` or `trojan://...` URI.
+5. Import it into a compatible client.
+
+The default protocol is VLESS. The URI contains the Worker hostname, TLS settings, WebSocket transport, path, and UUID.
+
+### Build the subscription URL
+
+In the same configuration JSON, locate:
+
+```text
+优选订阅生成.TOKEN
+```
+
+Build the URL with that value:
+
+```text
+https://YOUR_WORKER_HOST/sub?token=YOUR_TOKEN
+```
+
+Treat the subscription URL as a password. Anyone who has it can retrieve the generated nodes.
+
+### Subscription output formats
+
+| Requested output | URL suffix | Requirements |
+| --- | --- | --- |
+| Raw URI list in a browser | `/sub?token=TOKEN` | No external service |
+| Base64 URI subscription | `/sub?token=TOKEN&base64` | No external service |
+| Mihomo/Clash YAML | `/sub?token=TOKEN&clash` | Operator-owned `SUBAPI` and `SUBCONFIG` |
+| Sing-box JSON | `/sub?token=TOKEN&singbox` | Operator-owned `SUBAPI` and `SUBCONFIG` |
+| Surge configuration | `/sub?token=TOKEN&surge` | Operator-owned `SUBAPI` and `SUBCONFIG` |
+| Quantumult X conversion | `/sub?token=TOKEN&quanx` | Operator-owned `SUBAPI` and `SUBCONFIG` |
+| Loon conversion | `/sub?token=TOKEN&loon` | Operator-owned `SUBAPI` and `SUBCONFIG` |
+
+Mihomo, Sing-box, Surge, Quantumult X, and Loon are **client configuration formats**, not additional Worker inbound protocols. If conversion is not configured, the Worker returns HTTP 501 instead of silently contacting a public converter.
+
+## Using the current administrator page
+
+The administrator routes require a valid KV-backed session. A session expires after 24 hours; logout revokes it immediately.
+
+| Route | Method | Purpose |
+| --- | --- | --- |
+| `/login` | GET, POST | Display the local login form and create a session |
+| `/admin` | GET | Display the minimal local administrator index |
+| `/admin/config.json` | GET | Read the effective configuration, generated `LINK`, and subscription token |
+| `/admin/config.json` | POST | Save configuration JSON to KV |
+| `/admin/ADD.txt` | GET | Read the saved address list or a locally generated fallback list |
+| `/admin/ADD.txt` | POST | Save an operator-controlled address list to KV |
+| `/admin/log.json` | GET | Read request logs |
+| `/admin/init` | POST | Reset `config.json` to defaults; does not erase the address list or logs |
+| `/admin/check` | GET | Test an upstream SOCKS5/HTTP proxy against the configured operator-owned endpoint |
+| `/logout` | GET | Revoke the current session and clear the cookie |
+
+All configuration-changing POST requests require a same-origin `Origin` or `Referer` header. This is a CSRF protection, not an error.
+
+### Edit configuration from the browser
+
+Log in, open `/admin`, open the browser developer console, and run:
+
+```js
+const config = await fetch('/admin/config.json').then((response) => response.json());
+
+// Example: switch generated links from VLESS to Trojan.
+config.协议类型 = 'trojan';
+
+const response = await fetch('/admin/config.json', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(config),
+});
+
+console.log(response.status, await response.text());
+```
+
+A successful save returns `{"success":true}`. Refresh `/admin/config.json` to confirm the effective value.
+
+### Save your own address list
+
+Accepted line format:
+
+```text
+hostname-or-ip:port#display name
+```
+
+Examples:
+
+```text
+example.com:443#Primary
+203.0.113.10:443#IPv4 example
+[2001:db8::10]:443#IPv6 example
+```
+
+The documentation addresses above are examples; replace them with endpoints you are authorized to use. Invalid lines and ports outside `1-65535` are ignored.
+
+From the same authenticated browser console:
+
+```js
+const addresses = `example.com:443#Primary
+203.0.113.10:443#Backup`;
+
+const response = await fetch('/admin/ADD.txt', {
+  method: 'POST',
+  headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+  body: addresses,
+});
+
+console.log(response.status, await response.text());
+```
+
+### Reset the main configuration
+
+```js
+const response = await fetch('/admin/init', { method: 'POST' });
+console.log(response.status, await response.text());
+```
+
+This replaces `config.json` with defaults. It does not delete `ADD.txt`, logs, active sessions, Telegram settings, or saved Cloudflare usage settings.
+
+## Important configuration fields
+
+| JSON field | Default | Meaning |
+| --- | --- | --- |
+| `协议类型` | `vless` | Protocol used in generated node links; `vless` or `trojan` |
+| `支持协议` | `vless`, `trojan` | Informational list enforced by the runtime |
+| `传输协议` | `ws` | WebSocket transport |
+| `HOSTS` | Worker host | Hostnames used when generating subscriptions |
+| `跳过证书验证` | `false` | Disables client certificate verification when true; not recommended |
+| `启用0RTT` | `false` | Adds WebSocket early-data query data to generated paths |
+| `随机路径` | `false` | Uses `/` in locally generated subscription nodes when enabled |
+| `Fingerprint` | `chrome` | Client TLS fingerprint hint |
+| `ECH` | `false` | Enables ECH-related client configuration only when an HTTPS DoH endpoint is supplied |
+| `优选订阅生成.local` | `true` | Generate the subscription from the local KV address list |
+| `优选订阅生成.SUBNAME` | `edgetunnel` | Subscription and node display name |
+| `优选订阅生成.SUBUpdateTime` | `3` | Suggested client update interval in hours |
+| `优选订阅生成.本地IP库.随机数量` | `16` | Number of locally generated fallback addresses |
+| `订阅转换配置.SUBAPI` | `null` | Base URL of an operator-owned subscription converter |
+| `订阅转换配置.SUBCONFIG` | `null` | HTTPS URL of an operator-owned converter configuration |
+| `本地规则集URL` | `null` | Operator-owned Sing-box `.srs` rule-set base URL |
+| `客户端DNS` | `[]` | DNS resolvers explicitly inserted into generated Clash configuration |
+| `TG.启用` | `false` | Enables Telegram request notifications after credentials are configured |
+
+`HOST`, `UUID`, `PATH`, `LINK`, `TOKEN`, timestamps, usage data, and load timing are runtime-derived values. The Worker can overwrite them when reading the saved JSON.
+
+## Deployment variables and optional integrations
+
+Sensitive values must be stored with `wrangler secret put`. Non-secret operator settings may be placed under `[vars]` in `wrangler.toml`.
+
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `ADMIN` | Yes | Administrator password; store as a Secret |
+| `UUID` | Strongly recommended | RFC 4122 v4 VLESS/Trojan credential; store as a Secret |
+| `KEY` | No | Additional secret input and optional private subscription shortcut; store as a Secret |
+| `HOST` | No | Comma/newline-separated hostnames used in generated subscriptions |
+| `URL` | No | Root-path camouflage: `nginx`, `1101`, or an explicit HTTPS origin |
+| `PROXYIP` | No | Operator-selected TCP fallback proxy address |
+| `DNS_RESOLVER` | No | Operator-owned DNS resolver for optional VLESS DNS forwarding |
+| `DNS_RESOLVER_PORT` | No | DNS resolver port, default `53` |
+| `PROXY_CHECK_HOST` | No | Operator-owned HTTP endpoint host used for proxy tests |
+| `PROXY_CHECK_PORT` | No | Proxy-check endpoint port, default `80` |
+| `PROXY_CHECK_PATH` | No | Proxy-check HTTP path, default `/` |
+| `LOCATIONS_API` | No | Operator-owned HTTPS location-data endpoint |
+| `ECH_DOH_URL` | No | Explicit HTTPS DoH endpoint used only for ECH lookup |
+| `ALLOW_REMOTE_USAGE_API` | No | Must equal `true` before a saved remote usage URL may be requested |
+
+If an optional endpoint is absent, the related feature is disabled. The Worker does not select a hidden public fallback.
+
+## Custom domain
+
+Add a domain already managed in your Cloudflare account:
+
+```toml
+routes = [
+  { pattern = "tunnel.example.com", custom_domain = true }
+]
+```
+
+Redeploy:
+
 ```bash
 npx wrangler deploy
 ```
 
-部署成功后，控制台会显示 Worker 的访问网址（例如 `https://edgetunnel.xxx.workers.dev`）。
+After changing the hostname, retrieve `/admin/config.json` again. Subscription tokens are derived from the hostname and UUID, so the old hostname's token is not valid on the new hostname.
 
----
+## Updating and rolling back
 
-## ⚙️ 进阶配置
+Update from GitHub and validate before deployment:
 
-### 自主可控运行方式
-
-默认部署不再从第三方 GitHub、订阅转换站、代理回退站或外部管理页面加载运行时内容。登录页和管理页已内置；优选地址使用本地生成，并可通过认证后的 `POST /admin/ADD.txt` 保存自己的地址列表。
-
-以下远程能力默认关闭，只有明确配置为自己控制的 HTTPS 服务时才启用：
-
-- `订阅转换配置.SUBAPI` 与 `订阅转换配置.SUBCONFIG`：自建订阅转换服务和配置文件。
-- `本地规则集URL`：自建 Sing-box 规则集目录（例如 `https://rules.example.com`）。
-- `ECH_DOH_URL`：自建或自行选择的 HTTPS DoH 服务；仅在启用 ECH 时使用。
-- `ALLOW_REMOTE_USAGE_API=true`：允许管理员保存的 HTTPS 用量 API。未设置时不会发起该请求。
-- `DNS_RESOLVER` 与 `DNS_RESOLVER_PORT`：自有 DNS 上游；未设置时 VLESS UDP/DNS 转发关闭。
-- `PROXY_CHECK_HOST`、`PROXY_CHECK_PORT` 与 `PROXY_CHECK_PATH`：自有 HTTP 检测端点；未设置时后台上游代理检测关闭。
-- `客户端DNS`：仅在你明确填写时写入 Clash 配置，项目不再注入公共 DNS。
-- `LOCATIONS_API`：自有 HTTPS 位置数据接口；未设置时 `/locations` 明确返回 501，不再请求公共位置接口。
-
-仓库不包含上游单文件备份，也不会通过 DoH 或 GitHub 地址解析代理。Cloudflare 平台 API 属于部署平台能力；Telegram、伪装站、订阅转换器、规则集和用量 API 都是显式选择、默认关闭的可选集成。
-
-### 协议支持边界
-
-- VLESS over WebSocket/TLS：完整支持，已通过真实 Cloudflare TCP 转发测试。
-- Trojan over WebSocket/TLS：完整解析，并生成独立的 Trojan URI（不携带 VLESS 专用 `encryption=none`）。
-- VLESS DNS：仅在配置自有 `DNS_RESOLVER` 时启用。
-- SOCKS5/HTTP：作为可选上游代理使用，不是入站客户端协议。
-- Hysteria2、TUIC、WireGuard 等依赖原生 UDP/QUIC 的协议不在支持范围；Cloudflare Workers 当前主要提供入站 HTTP/WebSocket 和出站 TCP socket，不能可靠实现这些协议。
-
-不要把 `跳过证书验证` 设为 `true`，除非你了解由此带来的中间人攻击风险。
-
-### 绑定自定义域名
-在 `wrangler.toml` 中添加 `routes`：
-
-```toml
-routes = [
-	{ pattern = "tunnel.your-domain.com", custom_domain = true }
-]
-```
-重新部署：`npx wrangler deploy`
-
-### 设置管理员密码与协议凭据
-
-部署前必须设置强随机 `ADMIN`。`UUID` 必须是 RFC 4122 v4 格式；未设置时会由 `ADMIN` 与可选 `KEY` 确定性派生。建议分别设置，避免把 UUID 同时当作后台密码。
-
-```toml
-[vars]
-ADMIN = "你的强随机后台密码"
-UUID = "8a5ea040-33ff-4227-88bd-414bb865e59b"
+```bash
+git pull --ff-only
+npm test
+npm run check
+npx wrangler deploy --dry-run
+npx wrangler deploy
 ```
 
----
+Inspect recent versions or roll back with Wrangler:
 
-## ⚠️ 免责声明
+```bash
+npx wrangler versions list
+npx wrangler rollback
+```
 
-本项目仅供技术研究与学习使用，请勿用于任何非法用途。作者不对使用本项目产生的任何后果负责。
+Back up important KV values before destructive configuration changes. At minimum, save `config.json` and `ADD.txt` from the authenticated administrator routes.
+
+## Protocol boundaries
+
+Supported:
+
+- VLESS over WebSocket with TLS termination at Cloudflare.
+- Trojan over WebSocket with TLS termination at Cloudflare.
+- TCP destinations reachable through Cloudflare's outbound Socket API.
+- VLESS DNS forwarding only when an operator-owned DNS resolver is configured.
+- SOCKS5 and HTTP CONNECT as optional **upstream** proxies, not inbound client protocols.
+
+Not supported by this Worker:
+
+- Hysteria2 and TUIC, which require native QUIC/UDP behavior.
+- WireGuard as an inbound tunnel.
+- VLESS Reality, because TLS is terminated by Cloudflare.
+- Native raw-TCP, gRPC, HTTP/2, or HTTP/3 proxy ingress.
+- Arbitrary UDP forwarding; only the explicitly configured VLESS DNS path is handled.
+
+Adding a client output format does not add a new network protocol to the Worker core.
+
+## Security model
+
+- Login sessions use random 256-bit tokens; only SHA-256-derived session keys are stored in KV.
+- Session cookies are `HttpOnly`, `Secure`, and `SameSite=Strict`.
+- Sessions expire after 24 hours and are removed on logout.
+- Administrator mutations require a trusted same-origin request.
+- Subscription endpoints require a token derived from the Worker hostname and UUID.
+- Credentials are removed from stored request-log URLs.
+- Remote runtime integrations are opt-in and require explicit operator configuration.
+
+Operational recommendations:
+
+- Never commit `ADMIN`, `UUID`, API tokens, cookies, or subscription URLs.
+- Keep `跳过证书验证` set to `false`.
+- Use separate Workers and KV namespaces for staging and production.
+- Rotate `ADMIN` after suspected disclosure. Existing sessions remain active until logout or their 24-hour expiry.
+- Rotate `UUID` when a node or subscription leaks; all clients must then import the new link.
+- Protect Cloudflare API tokens with the minimum permissions required.
+
+## Troubleshooting
+
+### The root page only shows “Welcome to nginx”
+
+This is the default camouflage page. Open `/login`, not `/`.
+
+### `/admin` only shows a few links
+
+That is the current built-in administrator page. Use `/admin/config.json` for the generated node and token, and follow the browser-console examples above for updates. A full graphical editor is not claimed in the current release.
+
+### `503 Administrator password is not configured`
+
+Set the secret and wait for the new version to deploy:
+
+```bash
+npx wrangler secret put ADMIN
+```
+
+### `503` or a message about the KV binding
+
+Confirm that `wrangler.toml` contains a real namespace ID and that the binding is named `KV`.
+
+### `403 Invalid Token`
+
+Read the current token from `/admin/config.json`. Confirm that the URL hostname is exactly the same hostname used to retrieve the token. Custom domains and `workers.dev` names have different tokens.
+
+### A Clash, Sing-box, or Surge request returns `501`
+
+This is expected until both `订阅转换配置.SUBAPI` and `订阅转换配置.SUBCONFIG` point to HTTPS services controlled by the operator. Raw and Base64 URI subscriptions do not need a converter.
+
+### Proxy testing returns `503`
+
+Set `PROXY_CHECK_HOST`, `PROXY_CHECK_PORT`, and `PROXY_CHECK_PATH` to your own test endpoint. No public proxy-check service is selected automatically.
+
+### WebSocket connects but the destination does not respond
+
+Check the UUID/password, TLS host/SNI, WebSocket host and path, destination port, Cloudflare logs, and whether Cloudflare permits the requested outbound destination.
+
+Stream production logs:
+
+```bash
+npx wrangler tail
+```
+
+## Development and verification
+
+Run syntax and unit checks:
+
+```bash
+npm run check
+npm test
+```
+
+Available Cloudflare verification scripts:
+
+```bash
+npm run test:cloudflare:http
+npm run test:cloudflare
+```
+
+The Cloudflare scripts require a deliberately created test Worker/KV environment and test credentials. Do not run destructive tests against production data.
+
+## Project layout
+
+```text
+src/
+├── index.js                 # Worker entry point and routing
+├── config.js                # Defaults, KV configuration, links, logs
+├── controllers/
+│   ├── auth.js              # Login, sessions, origin checks, logout
+│   ├── admin.js             # Administrator API routes
+│   └── sub.js               # Subscription generation and conversion
+├── core/proxy.js            # WebSocket and outbound socket lifecycle
+├── protocols/
+│   ├── parsers.js           # VLESS and Trojan parsing
+│   └── socks5.js            # Optional SOCKS5/HTTP upstream support
+└── utils/                    # Pages, address parsing, patches, helpers
+```
+
+## Acknowledgements
+
+The implementation was inspired by community work, especially:
+
+- [cmliu/edgetunnel](https://github.com/cmliu/edgetunnel)
+- [zizifn/edgetunnel](https://github.com/zizifn/edgetunnel)
+
+The current runtime is modularized in this repository and does not load those repositories at runtime.
+
+## License and disclaimer
+
+See [LICENSE](LICENSE). Use this software only for legal purposes and on networks and systems you are authorized to access. The maintainers are not responsible for misuse or resulting loss.

@@ -15,9 +15,10 @@ head_sampling_rate = 0.1
 # ]
 
 [vars]
-# [Admin password and RFC 4122 v4 protocol UUID]
-# ADMIN = "replace-with-a-strong-random-password"
-# UUID = "8a5ea040-33ff-4227-88bd-414bb865e59b"
+# [Secrets: do not place ADMIN, UUID, KEY, or API tokens in this file]
+# Configure credentials interactively after the first deployment:
+# npx wrangler secret put ADMIN
+# npx wrangler secret put UUID
 
 # [Proxy IP]
 # PROXYIP = "1.2.3.4"
