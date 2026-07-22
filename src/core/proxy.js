@@ -213,7 +213,17 @@ async function forwardDataTCP(host, portNum, rawData, ws, respHeader, remoteConn
             remoteConnWrapper.socket = initialSocket;
             connectStreams(initialSocket, ws, respHeader, proxyIP ? connectToProxy : null);
         } catch (err) {
-            await connectToProxy();
+            if (!proxyIP) {
+                console.warn(`TCP connection failed: ${err.message}`);
+                closeSocketQuietly(ws);
+                return;
+            }
+            try {
+                await connectToProxy();
+            } catch (proxyError) {
+                console.warn(`TCP proxy fallback failed: ${proxyError.message}`);
+                closeSocketQuietly(ws);
+            }
         }
     }
 }
@@ -221,6 +231,9 @@ async function forwardDataTCP(host, portNum, rawData, ws, respHeader, remoteConn
 export async function handleWSRequest(request, yourUUID, proxyConfig) {
     const wssPair = new WebSocketPair();
     const [clientSock, serverSock] = Object.values(wssPair);
+    // Recent Workers compatibility dates deliver binary frames as Blob by
+    // default. The protocol parsers require ArrayBuffer/Uint8Array input.
+    serverSock.binaryType = 'arraybuffer';
     serverSock.accept();
     let remoteConnWrapper = { socket: null };
     let isDnsQuery = false;
