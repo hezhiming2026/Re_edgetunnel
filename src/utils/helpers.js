@@ -1,18 +1,52 @@
 
 export const uuidRegex = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
 
+function md5Hex(text) {
+    const input = new TextEncoder().encode(text);
+    const length = input.length;
+    const paddedLength = (length + 9 + 63) & ~63;
+    const bytes = new Uint8Array(paddedLength);
+    bytes.set(input);
+    bytes[length] = 0x80;
+    const view = new DataView(bytes.buffer);
+    const bitLength = length * 8;
+    view.setUint32(paddedLength - 8, bitLength >>> 0, true);
+    view.setUint32(paddedLength - 4, Math.floor(bitLength / 0x1_0000_0000), true);
+
+    const shifts = [7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21];
+    const constants = Array.from({ length: 64 }, (_, index) => Math.floor(Math.abs(Math.sin(index + 1)) * 0x1_0000_0000) >>> 0);
+    const rotateLeft = (value, amount) => ((value << amount) | (value >>> (32 - amount))) >>> 0;
+    let a0 = 0x67452301, b0 = 0xefcdab89, c0 = 0x98badcfe, d0 = 0x10325476;
+
+    for (let offset = 0; offset < paddedLength; offset += 64) {
+        const words = Array.from({ length: 16 }, (_, index) => view.getUint32(offset + index * 4, true));
+        let a = a0, b = b0, c = c0, d = d0;
+        for (let index = 0; index < 64; index++) {
+            let f, g;
+            if (index < 16) { f = (b & c) | (~b & d); g = index; }
+            else if (index < 32) { f = (d & b) | (~d & c); g = (5 * index + 1) % 16; }
+            else if (index < 48) { f = b ^ c ^ d; g = (3 * index + 5) % 16; }
+            else { f = c ^ (b | ~d); g = (7 * index) % 16; }
+            const next = d;
+            d = c;
+            c = b;
+            b = (b + rotateLeft((a + f + constants[index] + words[g]) >>> 0, shifts[index])) >>> 0;
+            a = next;
+        }
+        a0 = (a0 + a) >>> 0;
+        b0 = (b0 + b) >>> 0;
+        c0 = (c0 + c) >>> 0;
+        d0 = (d0 + d) >>> 0;
+    }
+
+    const digest = new Uint8Array(16);
+    const digestView = new DataView(digest.buffer);
+    [a0, b0, c0, d0].forEach((value, index) => digestView.setUint32(index * 4, value, true));
+    return Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
 export async function MD5MD5(text) {
-    const encoder = new TextEncoder();
-
-    const firstHash = await crypto.subtle.digest('MD5', encoder.encode(text));
-    const firstHashArray = Array.from(new Uint8Array(firstHash));
-    const firstHex = firstHashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-
-    const secondHash = await crypto.subtle.digest('MD5', encoder.encode(firstHex.slice(7, 27)));
-    const secondHashArray = Array.from(new Uint8Array(secondHash));
-    const secondHex = secondHashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-
-    return secondHex.toLowerCase();
+    return md5Hex(md5Hex(text).slice(7, 27));
 }
 
 export function base64ToArray(b64Str) {
