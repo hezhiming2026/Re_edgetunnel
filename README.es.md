@@ -5,10 +5,10 @@
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> ·
-  <a href="README.zh-CN.md">简体中文</a> ·
+  <a href="README.md">Inglés</a> ·
+  <a href="README.zh-CN.md">Chino simplificado</a> ·
   <a href="README.es.md">Español</a> ·
-  <a href="README.fa.md">فارسی</a>
+  <a href="README.fa.md">Persa</a>
 </p>
 
 <p align="center">
@@ -189,7 +189,7 @@ Inicia sesión con `ADMIN` y visita `/admin`.
 ### Copiar un nodo individual
 
 1. Inicia sesión y abre `/admin`.
-2. Selecciona **Configuration JSON**.
+2. Selecciona el enlace de configuración JSON.
 3. Busca el campo superior `LINK`.
 4. Copia el URI completo `vless://...` o `trojan://...`.
 5. Impórtalo en un cliente compatible.
@@ -198,13 +198,7 @@ El protocolo predeterminado es VLESS. El enlace ya contiene host, TLS, WebSocket
 
 ### Crear la URL de suscripción
 
-En el mismo JSON busca:
-
-```text
-优选订阅生成.TOKEN
-```
-
-Construye la URL:
+En el mismo JSON, busca la propiedad única `TOKEN` dentro del objeto de ajustes de suscripción. Construye la URL con ese valor:
 
 ```text
 https://HOST_DEL_WORKER/sub?token=TOKEN
@@ -247,13 +241,23 @@ Los POST que cambian datos exigen un encabezado `Origin` o `Referer` del mismo o
 
 ### Cambiar la configuración desde el navegador
 
+El esquema JSON guardado conserva nombres internos heredados por compatibilidad. Para mantener esta guía completamente en español y evitar escribir esos nombres manualmente, el ejemplo localiza el objeto de suscripción mediante propiedades ASCII estables.
+
 Después de iniciar sesión, abre `/admin` y la consola de desarrollo del navegador:
 
 ```js
 const config = await fetch('/admin/config.json').then((response) => response.json());
 
-// Ejemplo: generar enlaces Trojan en lugar de VLESS.
-config.协议类型 = 'trojan';
+const subscription = Object.values(config).find((value) =>
+  value && typeof value === 'object' &&
+  typeof value.TOKEN === 'string' &&
+  typeof value.SUBNAME === 'string'
+);
+
+if (!subscription) throw new Error('No se encontraron los ajustes de suscripción');
+
+// Ejemplo: cambiar el nombre visible sin depender de claves localizadas.
+subscription.SUBNAME = 'mi-edgetunnel';
 
 const response = await fetch('/admin/config.json', {
   method: 'POST',
@@ -306,26 +310,26 @@ console.log(response.status, await response.text());
 
 Solo restablece `config.json`. No borra `ADD.txt`, registros, sesiones, Telegram ni los ajustes de consumo Cloudflare.
 
-## Campos principales del JSON
+## Ajustes principales
 
-| Campo | Predeterminado | Significado |
+| Ajuste | Valor predeterminado | Significado |
 | --- | --- | --- |
-| `协议类型` | `vless` | `vless` o `trojan` para los enlaces generados |
-| `传输协议` | `ws` | Transporte WebSocket |
-| `HOSTS` | Host del Worker | Dominios usados en suscripciones |
-| `跳过证书验证` | `false` | Desactiva la validación del certificado; no recomendado |
-| `启用0RTT` | `false` | Añade datos tempranos a la ruta WebSocket |
-| `随机路径` | `false` | Usa `/` para los nodos locales cuando se activa |
-| `Fingerprint` | `chrome` | Sugerencia de huella TLS para el cliente |
-| `ECH` | `false` | Genera opciones ECH solo con DoH HTTPS explícito |
-| `优选订阅生成.local` | `true` | Genera desde la lista local en KV |
-| `优选订阅生成.SUBNAME` | `edgetunnel` | Nombre visible del nodo y la suscripción |
-| `优选订阅生成.SUBUpdateTime` | `3` | Intervalo recomendado de actualización, en horas |
-| `订阅转换配置.SUBAPI` | `null` | URL base del conversor propio |
-| `订阅转换配置.SUBCONFIG` | `null` | Configuración HTTPS del conversor propio |
-| `本地规则集URL` | `null` | Base propia para reglas `.srs` de Sing-box |
-| `客户端DNS` | `[]` | DNS que se añaden explícitamente al resultado Clash |
-| `TG.启用` | `false` | Activa avisos Telegram después de configurar credenciales |
+| Protocolo del nodo generado | `vless` | Selecciona enlaces VLESS o Trojan |
+| Transporte | WebSocket | Transporte entre el cliente y el Worker |
+| Lista de hosts | Host actual del Worker | Dominios usados en las suscripciones |
+| Omitir validación del certificado | Desactivado | Desactiva la validación del certificado del cliente; no recomendado |
+| 0-RTT | Desactivado | Añade datos tempranos a la ruta WebSocket |
+| Modo de ruta aleatoria | Desactivado | Usa `/` para los nodos locales cuando se activa |
+| Huella TLS | `chrome` | Sugerencia de huella TLS para el cliente |
+| ECH | Desactivado | Genera opciones ECH solo con un DoH HTTPS explícito |
+| Generación local de suscripciones | Activada | Usa la lista de direcciones guardada en KV |
+| Nombre de suscripción | `edgetunnel` | Nombre visible, almacenado como `SUBNAME` |
+| Intervalo de actualización | 3 horas | Frecuencia recomendada, almacenada como `SUBUpdateTime` |
+| API del conversor | Sin configurar | URL base propia, almacenada como `SUBAPI` |
+| Configuración del conversor | Sin configurar | URL HTTPS propia, almacenada como `SUBCONFIG` |
+| Base de reglas Sing-box | Sin configurar | URL base propia para archivos `.srs` |
+| Lista DNS del cliente | Vacía | DNS añadidos explícitamente al resultado Clash |
+| Avisos Telegram | Desactivados | Envía avisos después de configurar las credenciales |
 
 `HOST`, `UUID`, `PATH`, `LINK`, `TOKEN`, tiempos y consumo son valores derivados. El Worker puede recalcularlos al leer el JSON guardado.
 
@@ -417,7 +421,7 @@ Añadir un formato de cliente no añade un protocolo de red al núcleo.
 Recomendaciones:
 
 - Nunca confirmes en Git `ADMIN`, `UUID`, tokens API, cookies o enlaces de suscripción.
-- Mantén `跳过证书验证=false`.
+- Mantén activada la validación de certificados del cliente.
 - Separa Worker y KV de pruebas y producción.
 - Cambia `ADMIN` después de una filtración. Las sesiones ya activas duran hasta el cierre o 24 horas.
 - Cambia `UUID` si se filtra un nodo y vuelve a importarlo en todos los clientes.
@@ -449,7 +453,7 @@ Copia de nuevo el token desde el mismo hostname. Un dominio personalizado y el h
 
 ### Clash, Sing-box o Surge responde `501`
 
-Configura `订阅转换配置.SUBAPI` y `SUBCONFIG` con servicios HTTPS propios. Las salidas URI y Base64 no necesitan conversor.
+Configura las propiedades `SUBAPI` y `SUBCONFIG` del objeto del conversor con servicios HTTPS propios. Las salidas URI y Base64 no necesitan conversor.
 
 ### La prueba de proxy responde `503`
 

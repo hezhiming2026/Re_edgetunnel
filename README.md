@@ -6,9 +6,9 @@
 
 <p align="center">
   <a href="README.md">English</a> ·
-  <a href="README.zh-CN.md">简体中文</a> ·
-  <a href="README.es.md">Español</a> ·
-  <a href="README.fa.md">فارسی</a>
+  <a href="README.zh-CN.md">Simplified Chinese</a> ·
+  <a href="README.es.md">Spanish</a> ·
+  <a href="README.fa.md">Persian</a>
 </p>
 
 <p align="center">
@@ -217,13 +217,7 @@ The default protocol is VLESS. The URI contains the Worker hostname, TLS setting
 
 ### Build the subscription URL
 
-In the same configuration JSON, locate:
-
-```text
-优选订阅生成.TOKEN
-```
-
-Build the URL with that value:
+In the same configuration JSON, search for the unique `TOKEN` property inside the subscription-settings object. Build the URL with that value:
 
 ```text
 https://YOUR_WORKER_HOST/sub?token=YOUR_TOKEN
@@ -266,13 +260,23 @@ All configuration-changing POST requests require a same-origin `Origin` or `Refe
 
 ### Edit configuration from the browser
 
+The stored JSON schema retains legacy internal property names for backward compatibility. To keep this guide language-neutral and avoid typing those names manually, the example below locates the subscription object through its stable ASCII properties.
+
 Log in, open `/admin`, open the browser developer console, and run:
 
 ```js
 const config = await fetch('/admin/config.json').then((response) => response.json());
 
-// Example: switch generated links from VLESS to Trojan.
-config.协议类型 = 'trojan';
+const subscription = Object.values(config).find((value) =>
+  value && typeof value === 'object' &&
+  typeof value.TOKEN === 'string' &&
+  typeof value.SUBNAME === 'string'
+);
+
+if (!subscription) throw new Error('Subscription settings were not found');
+
+// Example: change the display name without depending on localized JSON keys.
+subscription.SUBNAME = 'my-edgetunnel';
 
 const response = await fetch('/admin/config.json', {
   method: 'POST',
@@ -327,28 +331,28 @@ console.log(response.status, await response.text());
 
 This replaces `config.json` with defaults. It does not delete `ADD.txt`, logs, active sessions, Telegram settings, or saved Cloudflare usage settings.
 
-## Important configuration fields
+## Important configuration settings
 
-| JSON field | Default | Meaning |
+| Setting | Default | Meaning |
 | --- | --- | --- |
-| `协议类型` | `vless` | Protocol used in generated node links; `vless` or `trojan` |
-| `支持协议` | `vless`, `trojan` | Informational list enforced by the runtime |
-| `传输协议` | `ws` | WebSocket transport |
-| `HOSTS` | Worker host | Hostnames used when generating subscriptions |
-| `跳过证书验证` | `false` | Disables client certificate verification when true; not recommended |
-| `启用0RTT` | `false` | Adds WebSocket early-data query data to generated paths |
-| `随机路径` | `false` | Uses `/` in locally generated subscription nodes when enabled |
-| `Fingerprint` | `chrome` | Client TLS fingerprint hint |
-| `ECH` | `false` | Enables ECH-related client configuration only when an HTTPS DoH endpoint is supplied |
-| `优选订阅生成.local` | `true` | Generate the subscription from the local KV address list |
-| `优选订阅生成.SUBNAME` | `edgetunnel` | Subscription and node display name |
-| `优选订阅生成.SUBUpdateTime` | `3` | Suggested client update interval in hours |
-| `优选订阅生成.本地IP库.随机数量` | `16` | Number of locally generated fallback addresses |
-| `订阅转换配置.SUBAPI` | `null` | Base URL of an operator-owned subscription converter |
-| `订阅转换配置.SUBCONFIG` | `null` | HTTPS URL of an operator-owned converter configuration |
-| `本地规则集URL` | `null` | Operator-owned Sing-box `.srs` rule-set base URL |
-| `客户端DNS` | `[]` | DNS resolvers explicitly inserted into generated Clash configuration |
-| `TG.启用` | `false` | Enables Telegram request notifications after credentials are configured |
+| Generated node protocol | `vless` | Selects VLESS or Trojan links |
+| Supported protocols | VLESS and Trojan | Informational capability list enforced by the runtime |
+| Transport | WebSocket | Client-to-Worker transport |
+| Host list | Current Worker host | Hostnames used when generating subscriptions |
+| Skip certificate verification | Disabled | Disables client certificate verification when enabled; not recommended |
+| 0-RTT | Disabled | Adds WebSocket early-data query data to generated paths |
+| Random path mode | Disabled | Uses `/` in locally generated subscription nodes when enabled |
+| TLS fingerprint | `chrome` | Client TLS fingerprint hint |
+| ECH | Disabled | Generates ECH client settings only when an HTTPS DoH endpoint is supplied |
+| Local subscription generation | Enabled | Generates subscriptions from the local KV address list |
+| Subscription name | `edgetunnel` | Subscription and node display name; stored as `SUBNAME` |
+| Subscription update interval | 3 hours | Suggested client refresh interval; stored as `SUBUpdateTime` |
+| Locally generated address count | `16` | Number of fallback addresses when no list is saved |
+| Converter API | Not configured | Operator-owned converter base URL; stored as `SUBAPI` |
+| Converter configuration | Not configured | Operator-owned HTTPS converter configuration; stored as `SUBCONFIG` |
+| Sing-box rule-set base | Not configured | Operator-owned `.srs` rule-set base URL |
+| Client DNS list | Empty | Resolvers explicitly inserted into generated Clash configuration |
+| Telegram notifications | Disabled | Sends request notifications after credentials are configured |
 
 `HOST`, `UUID`, `PATH`, `LINK`, `TOKEN`, timestamps, usage data, and load timing are runtime-derived values. The Worker can overwrite them when reading the saved JSON.
 
@@ -447,7 +451,7 @@ Adding a client output format does not add a new network protocol to the Worker 
 Operational recommendations:
 
 - Never commit `ADMIN`, `UUID`, API tokens, cookies, or subscription URLs.
-- Keep `跳过证书验证` set to `false`.
+- Keep client certificate verification enabled.
 - Use separate Workers and KV namespaces for staging and production.
 - Rotate `ADMIN` after suspected disclosure. Existing sessions remain active until logout or their 24-hour expiry.
 - Rotate `UUID` when a node or subscription leaks; all clients must then import the new link.
@@ -481,7 +485,7 @@ Read the current token from `/admin/config.json`. Confirm that the URL hostname 
 
 ### A Clash, Sing-box, or Surge request returns `501`
 
-This is expected until both `订阅转换配置.SUBAPI` and `订阅转换配置.SUBCONFIG` point to HTTPS services controlled by the operator. Raw and Base64 URI subscriptions do not need a converter.
+This is expected until the converter-settings object contains both `SUBAPI` and `SUBCONFIG` values pointing to HTTPS services controlled by the operator. Raw and Base64 URI subscriptions do not need a converter.
 
 ### Proxy testing returns `503`
 

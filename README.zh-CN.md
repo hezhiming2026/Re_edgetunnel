@@ -5,10 +5,10 @@
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> ·
+  <a href="README.md">英文</a> ·
   <a href="README.zh-CN.md">简体中文</a> ·
-  <a href="README.es.md">Español</a> ·
-  <a href="README.fa.md">فارسی</a>
+  <a href="README.es.md">西班牙语</a> ·
+  <a href="README.fa.md">波斯语</a>
 </p>
 
 <p align="center">
