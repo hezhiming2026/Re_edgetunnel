@@ -1,7 +1,7 @@
 # EdgeTunnel
 
 <p align="center">
-  Un túnel VLESS y Trojan sobre WebSocket para Cloudflare Workers, autohospedado y bajo control del operador.
+  Un túnel modular VLESS, Trojan y Shadowsocks para Cloudflare Workers, bajo control del operador.
 </p>
 
 <p align="center">
@@ -13,7 +13,7 @@
 
 <p align="center">
   <img alt="Cloudflare Workers" src="https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white">
-  <img alt="Protocolos" src="https://img.shields.io/badge/Protocolos-VLESS%20%7C%20Trojan-2563EB">
+  <img alt="Protocolos" src="https://img.shields.io/badge/Protocolos-VLESS%20%7C%20Trojan%20%7C%20Shadowsocks-2563EB">
   <img alt="Dependencias" src="https://img.shields.io/badge/Dependencias_en_ejecución-controladas_por_el_operador-16A34A">
 </p>
 
@@ -22,7 +22,7 @@
 
 ## Qué es este proyecto
 
-EdgeTunnel es un Cloudflare Worker modular. Acepta **VLESS sobre WebSocket/TLS** y **Trojan sobre WebSocket/TLS**, y abre conexiones TCP salientes mediante la API Socket de Cloudflare. La configuración, las sesiones, la lista de direcciones y los registros se guardan en un espacio Workers KV propiedad del operador.
+EdgeTunnel es un Cloudflare Worker modular. Acepta **VLESS y Trojan sobre WebSocket, XHTTP o gRPC**, además de **Shadowsocks SIP003 AEAD sobre WebSocket**, y abre conexiones TCP mediante la API Socket de Cloudflare, directamente o a través de un proxy ascendente configurado explícitamente.
 
 Durante la ejecución no descarga código ni un panel desde otros repositorios GitHub o CDN. Las integraciones remotas permanecen desactivadas hasta que el administrador configure explícitamente servicios bajo su control.
 
@@ -32,10 +32,19 @@ Durante la ejecución no descarga código ni un panel desde otros repositorios G
 | --- | --- |
 | VLESS sobre WebSocket/TLS | Compatible |
 | Trojan sobre WebSocket/TLS | Compatible |
+| VLESS/Trojan sobre XHTTP `stream-one` | Compatible; flujo limitado en ambos sentidos |
+| VLESS/Trojan sobre gRPC Hunk | Compatible; tramas fragmentadas y combinadas |
+| Shadowsocks `aes-128-gcm` / `aes-256-gcm` | Compatible sobre WebSocket con SIP003 AEAD |
+| DNS UDP de Trojan | Compatible con un DNS TCP propio |
 | TCP saliente con Cloudflare Sockets | Compatible |
+| Proxies ascendentes SOCKS5, HTTP y HTTPS | Compatibles |
+| TURN/TURNS RFC 6062 | Implementado para conexiones TCP |
+| SSTP | Implementado para TLS, PPP PAP/IPCP y TCP IPv4 interno |
 | Inicio de sesión, sesiones KV y cierre de sesión | Compatible |
 | Suscripciones protegidas por token | Compatible |
 | Suscripción basada en una lista local | Compatible |
+| Carrera limitada de conexiones directas/proxy | Compatible; por solicitud, `1`-`4` conexiones |
+| Respuesta local HTTP 204 para pruebas de conectividad | Compatible; sin tráfico saliente de prueba |
 | Conversión para Mihomo/Clash, Sing-box y Surge | Opcional; necesita un conversor del operador |
 | Consola gráfica de administración | Aún no implementada; la página actual ofrece JSON y texto locales |
 | Hysteria2, TUIC y otros protocolos QUIC/UDP nativos | No compatibles con esta arquitectura |
@@ -345,7 +354,12 @@ Usa `wrangler secret put` para datos sensibles. Los ajustes no sensibles pueden 
 | `HOST` | No | Hosts separados por coma o salto de línea |
 | `URL` | No | Camuflaje raíz: `nginx`, `1101` u origen HTTPS explícito |
 | `PROXYIP` | No | Proxy TCP de respaldo seleccionado por el operador |
-| `DNS_RESOLVER` | No | DNS propio para reenvío DNS de VLESS |
+| `UPSTREAM_PROXY` | No | URL absoluta `socks5://`, `http://`, `https://`, `turn://`, `turns://` o `sstp://` |
+| `TCP_CONCURRENT_DIAL` | No | Ancho de carrera TCP directa, limitado a `1`-`4`; valor predeterminado `1` |
+| `PROXY_CONCURRENT_DIAL` | No | Ancho de carrera de candidatos proxy, limitado a `1`-`4`; valor predeterminado `1` |
+| `SPEEDTEST_MODE` | No | `local` (predeterminado) devuelve HTTP 204 local con límites; `block` cierra el túnel |
+| `SPEEDTEST_DOMAINS` | No | Dominios de prueba local separados por coma o salto de línea; por defecto `speed.cloudflare.com` y `cp.cloudflare.com` |
+| `DNS_RESOLVER` | No | DNS TCP propio para DNS VLESS/Trojan y resolución de destinos TURN/SSTP |
 | `DNS_RESOLVER_PORT` | No | Puerto DNS; `53` por defecto |
 | `PROXY_CHECK_HOST` | No | Host propio usado para comprobar proxies |
 | `PROXY_CHECK_PORT` | No | Puerto de comprobación; `80` por defecto |
@@ -355,6 +369,8 @@ Usa `wrangler secret put` para datos sensibles. Los ajustes no sensibles pueden 
 | `ALLOW_REMOTE_USAGE_API` | No | Debe ser `true` para permitir una API remota de consumo guardada |
 
 Si falta un endpoint opcional, la función correspondiente permanece desactivada; no existe un servicio público oculto de respaldo.
+
+Los ajustes de marcado se analizan en cada solicitud y nunca se conservan como estado global mutable entre solicitudes. La prueba local no abre sockets salientes, acepta HTTP fragmentado o persistente y limita cabeceras, cuerpo, canalización y búfer.
 
 ## Dominio personalizado
 
@@ -393,18 +409,21 @@ Guarda copias de `config.json` y `ADD.txt` antes de cambios destructivos.
 
 Compatible:
 
-- VLESS y Trojan sobre WebSocket con TLS terminado por Cloudflare.
+- VLESS y Trojan sobre WebSocket, XHTTP `stream-one` y gRPC Hunk.
+- Shadowsocks SIP003 AEAD sobre WebSocket con `aes-128-gcm` o `aes-256-gcm`.
 - Destinos TCP accesibles con la API Socket de Cloudflare.
-- DNS de VLESS cuando existe un DNS propio explícito.
-- SOCKS5 y HTTP CONNECT como proxies **ascendentes**, no como protocolos de entrada.
+- DNS de VLESS/Trojan cuando existe un DNS TCP propio.
+- SOCKS5, HTTP(S) CONNECT, TURN(S) RFC 6062 y SSTP como proxies **ascendentes**.
 
 No compatible:
 
 - Hysteria2 y TUIC, que necesitan QUIC/UDP nativo.
 - WireGuard entrante.
 - VLESS Reality, porque Cloudflare termina TLS.
-- Entrada proxy TCP nativa, gRPC, HTTP/2 o HTTP/3.
-- UDP arbitrario; únicamente la ruta DNS VLESS configurada.
+- Entrada TCP nativa o un proxy HTTP genérico.
+- UDP arbitrario; únicamente DNS VLESS/Trojan configurado.
+
+TURN se limita a RFC 6062 TCP. SSTP se limita a TLS, PPP PAP/IPCP, IPv4 y TCP interno; no cubre otros métodos de autenticación, IPv6CP, MPPE ni extensiones de proveedor.
 
 Añadir un formato de cliente no añade un protocolo de red al núcleo.
 

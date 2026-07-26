@@ -72,16 +72,28 @@ export function normalizeProxyProtocol(value) {
     return String(value || '').toLowerCase() === 'trojan' ? 'trojan' : 'vless';
 }
 
+export function normalizeTransport(value) {
+    const transport = String(value || '').toLowerCase();
+    return ['ws', 'xhttp', 'grpc'].includes(transport) ? transport : 'ws';
+}
+
 export function buildProxyUri({ protocol, credential, address, port = 443, host, transport = 'ws', path = '/', fingerprint = 'chrome', name = 'edgetunnel', skipCertificateVerification = false, ech = null, fragment = null }) {
     const normalizedProtocol = normalizeProxyProtocol(protocol);
+    const normalizedTransport = normalizeTransport(transport);
     const params = new URLSearchParams({
         security: 'tls',
-        type: transport,
+        type: normalizedTransport,
         host,
         fp: fingerprint,
         sni: host,
-        path,
     });
+    if (normalizedTransport === 'grpc') {
+        params.set('serviceName', String(path || '/').replace(/^\/+/, ''));
+        params.set('mode', 'gun');
+    } else {
+        params.set('path', path);
+        if (normalizedTransport === 'xhttp') params.set('mode', 'stream-one');
+    }
     if (normalizedProtocol === 'vless') params.set('encryption', 'none');
     if (skipCertificateVerification) {
         params.set('insecure', '1');
@@ -89,7 +101,36 @@ export function buildProxyUri({ protocol, credential, address, port = 443, host,
     }
     if (ech) params.set('ech', ech);
     if (fragment) params.set('fragment', fragment);
-    return `${normalizedProtocol}://${encodeURIComponent(credential)}@${address}:${port}?${params.toString()}#${encodeURIComponent(name)}`;
+    const formattedAddress = String(address).includes(':') && !String(address).startsWith('[')
+        ? `[${address}]`
+        : address;
+    return `${normalizedProtocol}://${encodeURIComponent(credential)}@${formattedAddress}:${port}?${params.toString()}#${encodeURIComponent(name)}`;
+}
+
+export function buildShadowsocksUri({
+    method = 'aes-128-gcm',
+    password,
+    address,
+    port = 443,
+    host,
+    path = '/',
+    name = 'edgetunnel',
+    tls = true,
+}) {
+    const normalizedMethod = ['aes-128-gcm', 'aes-256-gcm'].includes(String(method).toLowerCase())
+        ? String(method).toLowerCase()
+        : 'aes-128-gcm';
+    const credentials = btoa(`${normalizedMethod}:${password}`)
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=+$/, '');
+    const pluginPath = `${path}${String(path).includes('?') ? '&' : '?'}enc=${encodeURIComponent(normalizedMethod)}`;
+    const plugin = `v2ray-plugin;mode=websocket;host=${host};path=${pluginPath}${tls ? ';tls' : ''}`;
+    const params = new URLSearchParams({ plugin });
+    const formattedAddress = String(address).includes(':') && !String(address).startsWith('[')
+        ? `[${address}]`
+        : address;
+    return `ss://${credentials}@${formattedAddress}:${port}?${params.toString()}#${encodeURIComponent(name)}`;
 }
 
 export function isValidBase64(str) {

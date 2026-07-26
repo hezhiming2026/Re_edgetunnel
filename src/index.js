@@ -6,6 +6,10 @@ import { handleSub } from './controllers/sub.js';
 import { handleWSRequest } from './core/proxy.js';
 import { MD5MD5, uuidRegex } from './utils/helpers.js';
 import { nginx, html1101, fetchMasquerade } from './utils/pages.js';
+import { parseConcurrentDialCount } from './core/dialer.js';
+import { parseSpeedTestDomains, parseSpeedTestMode } from './core/speedtest.js';
+import { handleGrpcRequest, handleXHttpRequest } from './core/http-tunnel.js';
+import { parseUpstreamProxy } from './protocols/upstream.js';
 
 export default {
     async fetch(request, env, ctx) {
@@ -26,22 +30,29 @@ export default {
         const path = url.pathname.slice(1);
         const pathLower = path.toLowerCase();
 
+        const createProxyConfig = () => ({
+            proxyIP: env.PROXYIP || null,
+            socks5Type: null,
+            socks5Account: '',
+            socks5Global: false,
+            socks5Whitelist: [],
+            cachedProxyIndexRef: { value: 0 },
+            enableProxyFallback: Boolean(env.PROXYIP),
+            tcpConcurrentDial: parseConcurrentDialCount(env.TCP_CONCURRENT_DIAL),
+            proxyConcurrentDial: parseConcurrentDialCount(env.PROXY_CONCURRENT_DIAL),
+            speedTestMode: parseSpeedTestMode(env.SPEEDTEST_MODE),
+            speedTestDomains: parseSpeedTestDomains(env.SPEEDTEST_DOMAINS),
+            upstreamProxy: parseUpstreamProxy(env.UPSTREAM_PROXY),
+            dnsResolver: env.DNS_RESOLVER ? {
+                hostname: env.DNS_RESOLVER,
+                port: Number(env.DNS_RESOLVER_PORT || 53),
+            } : null,
+        });
+
         // --- WS Handling ---
         if (upgradeHeader === 'websocket') {
             if (adminPassword) {
-                let proxyConfig = {
-                    proxyIP: env.PROXYIP || null,
-                    socks5Type: null,
-                    socks5Account: '',
-                    socks5Global: false,
-                    socks5Whitelist: [],
-                    cachedProxyIndexRef: { value: 0 },
-                    enableProxyFallback: Boolean(env.PROXYIP),
-                    dnsResolver: env.DNS_RESOLVER ? {
-                        hostname: env.DNS_RESOLVER,
-                        port: Number(env.DNS_RESOLVER_PORT || 53),
-                    } : null,
-                };
+                let proxyConfig = createProxyConfig();
 
                 const proxyMatch = pathLower.match(/\/(proxyip[.=]|pyip=|ip=)(.+)/);
                 if (url.searchParams.has('proxyip')) {
@@ -62,6 +73,18 @@ export default {
         if (url.protocol === 'http:') return Response.redirect(url.href.replace('http:', 'https:'), 301);
 
         if (!adminPassword) return new Response('Administrator password is not configured.', { status: 503 });
+
+        const contentType = request.headers.get('content-type')?.toLowerCase() || '';
+        const isReservedHttpRoute = pathLower === 'login' || pathLower === 'sub' || pathLower.startsWith('admin/');
+        if (request.method === 'POST' && !isReservedHttpRoute) {
+            if (contentType.startsWith('application/grpc')) {
+                return handleGrpcRequest(request, userID, createProxyConfig());
+            }
+            const referer = request.headers.get('referer') || '';
+            if (contentType.startsWith('application/octet-stream') || referer.includes('x_padding=')) {
+                return handleXHttpRequest(request, userID, createProxyConfig());
+            }
+        }
 
         if (env.KV && typeof env.KV.get === 'function') {
             if (path === secretKey && secretKey !== '勿动此默认密钥，有需求请自行通过添加变量KEY进行修改') {

@@ -1,5 +1,5 @@
 
-import { MD5MD5, maskSensitiveInfo, buildProxyUri, normalizeProxyProtocol } from './utils/helpers.js';
+import { MD5MD5, maskSensitiveInfo, buildProxyUri, buildShadowsocksUri, normalizeProxyProtocol, normalizeTransport } from './utils/helpers.js';
 import { generateRandomIP, organizeToArray, getCloudflareUsage } from './utils/ip.js';
 
 export async function readConfig(env, hostname, userID, path, reset = false) {
@@ -14,8 +14,14 @@ export async function readConfig(env, hostname, userID, path, reset = false) {
         HOSTS: [hostname],
         UUID: userID,
         协议类型: "vless",
-        支持协议: ["vless", "trojan"],
+        支持协议: ["vless", "trojan", "shadowsocks"],
         传输协议: "ws",
+        TRANSPORTS: ["ws", "xhttp", "grpc"],
+        SHADOWSOCKS: {
+            enabled: true,
+            method: "aes-128-gcm",
+            tls: true,
+        },
         跳过证书验证: false,
         启用0RTT: false,
         TLS分片: null,
@@ -95,7 +101,13 @@ export async function readConfig(env, hostname, userID, path, reset = false) {
     if (env.HOST) config_JSON.HOSTS = (await organizeToArray(env.HOST)).map(h => h.toLowerCase().replace(/^https?:\/\//, '').split('/')[0].split(':')[0]);
     config_JSON.UUID = userID;
     config_JSON.协议类型 = normalizeProxyProtocol(config_JSON.协议类型);
-    config_JSON.支持协议 = ["vless", "trojan"];
+    config_JSON.支持协议 = ["vless", "trojan", "shadowsocks"];
+    config_JSON.传输协议 = normalizeTransport(config_JSON.传输协议);
+    if (!Array.isArray(config_JSON.TRANSPORTS)) config_JSON.TRANSPORTS = ["ws", "xhttp", "grpc"];
+    config_JSON.TRANSPORTS = [...new Set(config_JSON.TRANSPORTS.map(normalizeTransport))];
+    if (!config_JSON.SHADOWSOCKS || typeof config_JSON.SHADOWSOCKS !== 'object') {
+        config_JSON.SHADOWSOCKS = structuredClone(defaultConfig.SHADOWSOCKS);
+    }
     if (!Array.isArray(config_JSON.客户端DNS)) config_JSON.客户端DNS = [];
     if (!config_JSON.随机路径) config_JSON.随机路径 = false;
     if (!config_JSON.启用0RTT) config_JSON.启用0RTT = false;
@@ -129,13 +141,41 @@ export async function readConfig(env, hostname, userID, path, reset = false) {
         address: host,
         host,
         transport: config_JSON.传输协议,
-        path: config_JSON.启用0RTT ? config_JSON.PATH + '?ed=2560' : config_JSON.PATH,
+        path: config_JSON.传输协议 === 'ws' && config_JSON.启用0RTT
+            ? config_JSON.PATH + '?ed=2560'
+            : config_JSON.PATH,
         fingerprint: config_JSON.Fingerprint,
         name: config_JSON.优选订阅生成.SUBNAME,
         skipCertificateVerification: config_JSON.跳过证书验证,
         ech: ECHValue,
         fragment: TLSFragment,
     });
+    config_JSON.LINKS = [
+        ...["vless", "trojan"].flatMap(protocol =>
+            config_JSON.TRANSPORTS.map(transport => buildProxyUri({
+                protocol,
+                credential: userID,
+                address: host,
+                host,
+                transport,
+                path: config_JSON.PATH,
+                fingerprint: config_JSON.Fingerprint,
+                name: `${config_JSON.优选订阅生成.SUBNAME}-${protocol}-${transport}`,
+                skipCertificateVerification: config_JSON.跳过证书验证,
+                ech: ECHValue,
+                fragment: TLSFragment,
+            }))
+        ),
+        ...(config_JSON.SHADOWSOCKS.enabled ? [buildShadowsocksUri({
+            method: config_JSON.SHADOWSOCKS.method,
+            password: userID,
+            address: host,
+            host,
+            path: config_JSON.PATH,
+            name: `${config_JSON.优选订阅生成.SUBNAME}-shadowsocks-ws`,
+            tls: config_JSON.SHADOWSOCKS.tls !== false,
+        })] : []),
+    ];
     config_JSON.优选订阅生成.TOKEN = await MD5MD5(hostname + userID);
 
     // Load TG config

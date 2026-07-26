@@ -1,7 +1,7 @@
 # EdgeTunnel
 
 <p align="center" dir="rtl">
-  تونل خودمیزبان VLESS و Trojan بر بستر WebSocket برای Cloudflare Workers، تحت کنترل کامل اپراتور.
+  تونل ماژولار VLESS، Trojan و Shadowsocks برای Cloudflare Workers، تحت کنترل کامل اپراتور.
 </p>
 
 <p align="center">
@@ -13,7 +13,7 @@
 
 <p align="center">
   <img alt="Cloudflare Workers" src="https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white">
-  <img alt="Protocols" src="https://img.shields.io/badge/Protocols-VLESS%20%7C%20Trojan-2563EB">
+  <img alt="Protocols" src="https://img.shields.io/badge/Protocols-VLESS%20%7C%20Trojan%20%7C%20Shadowsocks-2563EB">
   <img alt="Dependencies" src="https://img.shields.io/badge/Runtime_dependencies-operator_controlled-16A34A">
 </p>
 
@@ -22,7 +22,7 @@
 
 ## این پروژه چیست؟
 
-EdgeTunnel یک Cloudflare Worker ماژولار است. این Worker اتصال‌های **VLESS روی WebSocket/TLS** و **Trojan روی WebSocket/TLS** را دریافت می‌کند و با Socket API کلادفلر اتصال TCP خروجی می‌سازد. تنظیمات، نشست‌های ورود، فهرست آدرس‌ها و گزارش درخواست‌ها در Workers KV متعلق به خود اپراتور ذخیره می‌شوند.
+EdgeTunnel یک Cloudflare Worker ماژولار است. این Worker **VLESS و Trojan روی WebSocket، XHTTP یا gRPC** و نیز **Shadowsocks SIP003 AEAD روی WebSocket** را دریافت می‌کند و با Socket API کلادفلر، مستقیم یا از راه پراکسی بالادستی صریح، اتصال TCP خروجی می‌سازد.
 
 در زمان اجرا هیچ کد، پنل مدیریت یا تنظیماتی از مخزن GitHub یا CDN دیگر بارگیری نمی‌شود. سرویس‌های راه‌دور تا زمانی که مدیر نشانی سرویس تحت کنترل خود را وارد نکند غیرفعال می‌مانند.
 
@@ -32,10 +32,19 @@ EdgeTunnel یک Cloudflare Worker ماژولار است. این Worker اتصا�
 | --- | --- |
 | VLESS روی WebSocket/TLS | پشتیبانی می‌شود |
 | Trojan روی WebSocket/TLS | پشتیبانی می‌شود |
+| VLESS/Trojan روی XHTTP `stream-one` | پشتیبانی می‌شود؛ جریان محدود دوطرفه |
+| VLESS/Trojan روی gRPC Hunk | پشتیبانی از فریم تکه‌تکه و ترکیبی |
+| Shadowsocks `aes-128-gcm` / `aes-256-gcm` | پشتیبانی روی WebSocket با SIP003 AEAD |
+| DNS مبتنی بر UDP در Trojan | با DNS مبتنی بر TCP متعلق به اپراتور |
 | TCP خروجی با Cloudflare Sockets | پشتیبانی می‌شود |
+| پراکسی بالادستی SOCKS5، HTTP و HTTPS | پشتیبانی می‌شود |
+| TURN/TURNS RFC 6062 | برای اتصال TCP پیاده‌سازی شده |
+| SSTP | برای TLS، PPP PAP/IPCP و TCP داخلی IPv4 پیاده‌سازی شده |
 | ورود با رمز، نشست KV و خروج | پشتیبانی می‌شود |
 | اشتراک محافظت‌شده با token | پشتیبانی می‌شود |
 | اشتراک بر پایهٔ فهرست آدرس محلی | پشتیبانی می‌شود |
+| رقابت محدود اتصال مستقیم و پراکسی | پشتیبانی می‌شود؛ برای هر درخواست، `1` تا `4` اتصال |
+| پاسخ محلی HTTP 204 برای آزمون اتصال | پشتیبانی می‌شود؛ بدون ترافیک آزمون خروجی |
 | تبدیل Mihomo/Clash، Sing-box و Surge | اختیاری؛ نیازمند مبدل تحت کنترل اپراتور |
 | پنل گرافیکی مدیریت | هنوز پیاده‌سازی نشده؛ صفحهٔ فعلی JSON و متن محلی ارائه می‌کند |
 | Hysteria2، TUIC و پروتکل‌های بومی QUIC/UDP | در این معماری پشتیبانی نمی‌شوند |
@@ -345,7 +354,12 @@ console.log(response.status, await response.text());
 | `HOST` | خیر | دامنه‌های جداشده با ویرگول یا خط جدید |
 | `URL` | خیر | پوشش مسیر اصلی: `nginx`، `1101` یا مبدأ HTTPS صریح |
 | `PROXYIP` | خیر | پراکسی TCP پشتیبان انتخاب‌شده توسط اپراتور |
-| `DNS_RESOLVER` | خیر | DNS اپراتور برای انتقال DNS در VLESS |
+| `UPSTREAM_PROXY` | خیر | نشانی کامل `socks5://`، `http://`، `https://`، `turn://`، `turns://` یا `sstp://` |
+| `TCP_CONCURRENT_DIAL` | خیر | تعداد رقابت اتصال مستقیم TCP، محدود به `1` تا `4`؛ پیش‌فرض `1` |
+| `PROXY_CONCURRENT_DIAL` | خیر | تعداد رقابت نامزدهای پراکسی، محدود به `1` تا `4`؛ پیش‌فرض `1` |
+| `SPEEDTEST_MODE` | خیر | `local` (پیش‌فرض) پاسخ HTTP 204 محلی و محدود می‌دهد؛ `block` تونل را می‌بندد |
+| `SPEEDTEST_DOMAINS` | خیر | دامنه‌های آزمون محلی جداشده با ویرگول یا خط جدید؛ پیش‌فرض `speed.cloudflare.com` و `cp.cloudflare.com` |
+| `DNS_RESOLVER` | خیر | DNS مبتنی بر TCP اپراتور برای VLESS/Trojan و مقصدهای TURN/SSTP |
 | `DNS_RESOLVER_PORT` | خیر | پورت DNS؛ پیش‌فرض `53` |
 | `PROXY_CHECK_HOST` | خیر | میزبان متعلق به اپراتور برای بررسی پراکسی |
 | `PROXY_CHECK_PORT` | خیر | پورت بررسی؛ پیش‌فرض `80` |
@@ -355,6 +369,8 @@ console.log(response.status, await response.text());
 | `ALLOW_REMOTE_USAGE_API` | خیر | باید `true` باشد تا API مصرف راه‌دور فراخوانی شود |
 
 نبودن هر endpoint اختیاری، قابلیت مربوط را غیرفعال می‌کند. سرویس عمومی مخفی به‌عنوان جایگزین وجود ندارد.
+
+تنظیمات اتصال برای هر درخواست جداگانه خوانده می‌شوند و به‌صورت وضعیت سراسری تغییرپذیر بین درخواست‌ها باقی نمی‌مانند. آزمون محلی هیچ سوکت خروجی باز نمی‌کند، HTTP تکه‌شده یا پایدار را می‌پذیرد و برای سرآیند، بدنه، خط لوله و بافر حد سخت دارد.
 
 ## دامنهٔ سفارشی
 
@@ -393,18 +409,21 @@ npx wrangler rollback
 
 پشتیبانی می‌شود:
 
-- VLESS و Trojan روی WebSocket با خاتمهٔ TLS در Cloudflare.
+- VLESS و Trojan روی WebSocket، XHTTP `stream-one` و gRPC Hunk.
+- Shadowsocks SIP003 AEAD روی WebSocket با `aes-128-gcm` یا `aes-256-gcm`.
 - مقصدهای TCP قابل دسترسی با Socket API کلادفلر.
-- انتقال DNS در VLESS فقط با DNS متعلق به اپراتور.
-- SOCKS5 و HTTP CONNECT به‌عنوان پراکسی **بالادستی**، نه پروتکل ورودی.
+- انتقال DNS در VLESS/Trojan فقط با DNS مبتنی بر TCP متعلق به اپراتور.
+- SOCKS5، HTTP(S) CONNECT، TURN(S) RFC 6062 و SSTP به‌عنوان پراکسی **بالادستی**.
 
 پشتیبانی نمی‌شود:
 
 - Hysteria2 و TUIC که به QUIC/UDP بومی نیاز دارند.
 - WireGuard ورودی.
 - VLESS Reality، چون TLS در Cloudflare خاتمه می‌یابد.
-- ورودی raw TCP، gRPC، HTTP/2 یا HTTP/3.
-- UDP دلخواه؛ فقط مسیر DNS صریح VLESS پردازش می‌شود.
+- ورودی raw TCP یا پراکسی عمومی HTTP.
+- UDP دلخواه؛ فقط DNS صریح VLESS/Trojan پردازش می‌شود.
+
+TURN به TCP در RFC 6062 محدود است. SSTP به TLS، PPP PAP/IPCP، IPv4 و TCP داخلی محدود است و روش‌های احراز هویت دیگر، IPv6CP، MPPE یا افزونه‌های سازنده را پوشش نمی‌دهد.
 
 افزودن قالب خروجی کلاینت به معنی افزودن پروتکل شبکه به هسته نیست.
 

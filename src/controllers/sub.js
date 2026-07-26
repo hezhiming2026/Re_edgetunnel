@@ -1,5 +1,5 @@
 
-import { MD5MD5, batchReplaceDomain, buildProxyUri, normalizeProxyProtocol } from "../utils/helpers.js";
+import { MD5MD5, batchReplaceDomain, buildProxyUri, buildShadowsocksUri, normalizeTransport } from "../utils/helpers.js";
 import { generateRandomIP, parseLocalAddressList } from "../utils/ip.js";
 import { SingboxPatch, ClashPatch, SurgePatch } from "../utils/patches.js";
 import { logRequest } from "../config.js";
@@ -57,13 +57,11 @@ export async function handleSub(request, env, config, ctx) {
                         (url.searchParams.has('loon') || ua.includes('loon') ? 'loon' : 'mixed')))));
 
     if (!ua.includes('mozilla')) responseHeaders["Content-Disposition"] = `attachment; filename*=utf-8''${encodeURIComponent(config.优选订阅生成.SUBNAME)}`;
-    const protocolType = (url.searchParams.has('surge') || ua.includes('surge')) ? 'trojan' : normalizeProxyProtocol(config.协议类型);
-
     let content = '';
 
     if (type === 'mixed') {
         let links = '';
-        const path = config.启用0RTT ? config.PATH + '?ed=2560' : config.PATH;
+        const path = config.PATH;
         const tlsFragment = config.TLS分片 == 'Shadowrocket' ? '1,40-60,30-50,tlshello' : config.TLS分片 == 'Happ' ? '3,1,tlshello' : null;
         const echValue = config.ECH && config.ECHConfig?.DNS ? (config.ECHConfig.SNI ? config.ECHConfig.SNI + '+' : '') + config.ECHConfig.DNS : null;
 
@@ -74,21 +72,43 @@ export async function handleSub(request, env, config, ctx) {
                 const [generatedAddresses] = await generateRandomIP(request, config.优选订阅生成.本地IP库.随机数量, config.优选订阅生成.本地IP库.指定端口);
                 addressEntries = parseLocalAddressList(generatedAddresses.join('\n'));
             }
-            links = addressEntries.map(({ address, port, name }) => {
-                return buildProxyUri({
-                    protocol: protocolType,
-                    credential: '00000000-0000-4000-8000-000000000000',
-                    address,
-                    port,
-                    host,
-                    transport: config.传输协议,
-                    path: config.随机路径 ? '/' : path,
-                    fingerprint: config.Fingerprint,
-                    name,
-                    skipCertificateVerification: config.跳过证书验证,
-                    ech: echValue,
-                    fragment: tlsFragment,
-                });
+            const transports = Array.isArray(config.TRANSPORTS)
+                ? [...new Set(config.TRANSPORTS.map(normalizeTransport))]
+                : [normalizeTransport(config.传输协议)];
+            const protocols = (url.searchParams.has('surge') || ua.includes('surge'))
+                ? ['trojan']
+                : ['vless', 'trojan'];
+            links = addressEntries.flatMap(({ address, port, name }) => {
+                const nodePath = config.随机路径 ? '/' : path;
+                const proxyLinks = protocols.flatMap(protocol =>
+                    transports.map(transport => buildProxyUri({
+                        protocol,
+                        credential: userID,
+                        address,
+                        port,
+                        host,
+                        transport,
+                        path: transport === 'ws' && config.启用0RTT ? `${nodePath}${nodePath.includes('?') ? '&' : '?'}ed=2560` : nodePath,
+                        fingerprint: config.Fingerprint,
+                        name: `${name}-${protocol}-${transport}`,
+                        skipCertificateVerification: config.跳过证书验证,
+                        ech: echValue,
+                        fragment: tlsFragment,
+                    }))
+                );
+                if (config.SHADOWSOCKS?.enabled && !url.searchParams.has('surge') && !ua.includes('surge')) {
+                    proxyLinks.push(buildShadowsocksUri({
+                        method: config.SHADOWSOCKS.method,
+                        password: userID,
+                        address,
+                        port,
+                        host,
+                        path: nodePath,
+                        name: `${name}-shadowsocks-ws`,
+                        tls: config.SHADOWSOCKS.tls !== false,
+                    }));
+                }
+                return proxyLinks;
             }).join('\n');
         } else {
             // Fetch from SUB

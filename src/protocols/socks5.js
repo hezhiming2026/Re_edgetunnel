@@ -41,14 +41,18 @@ export async function socks5Connect(targetHost, targetPort, initialData, parsedS
     }
 }
 
-export async function httpConnect(targetHost, targetPort, initialData, parsedSocks5Address) {
+export async function httpConnect(targetHost, targetPort, initialData, parsedSocks5Address, options = {}) {
     if (!isSafeConnectTarget(targetHost, targetPort)) throw new Error('Invalid proxy target');
     const { username, password, hostname, port } = parsedSocks5Address;
-    const socket = connect({ hostname, port });
+    const socket = connect(
+        { hostname, port },
+        { secureTransport: options.tls ? 'on' : 'off', allowHalfOpen: true }
+    );
     const writer = socket.writable.getWriter();
     const reader = socket.readable.getReader();
 
     try {
+        await socket.opened;
         const auth = username && password ? `Proxy-Authorization: Basic ${btoa(`${username}:${password}`)}\r\n` : '';
         const request = `CONNECT ${targetHost}:${targetPort} HTTP/1.1\r\nHost: ${targetHost}:${targetPort}\r\n${auth}User-Agent: Mozilla/5.0\r\nConnection: keep-alive\r\n\r\n`;
         await writer.write(new TextEncoder().encode(request));
@@ -64,7 +68,11 @@ export async function httpConnect(targetHost, targetPort, initialData, parsedSoc
         }
 
         if (headerEndIndex === -1) throw new Error('Invalid HTTP response');
-        const statusCode = parseInt(new TextDecoder().decode(responseBuffer.slice(0, headerEndIndex)).split('\r\n')[0].match(/HTTP\/\d\.\d\s+(\d+)/)[1]);
+        const statusMatch = new TextDecoder().decode(responseBuffer.slice(0, headerEndIndex))
+            .split('\r\n')[0]
+            .match(/^HTTP\/\d(?:\.\d)?\s+(\d{3})\b/i);
+        if (!statusMatch) throw new Error('Invalid HTTP proxy response');
+        const statusCode = Number(statusMatch[1]);
         if (statusCode < 200 || statusCode >= 300) throw new Error(`Connection failed: HTTP ${statusCode}`);
 
         await writer.write(initialData);

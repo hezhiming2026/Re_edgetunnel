@@ -18,7 +18,10 @@ test('default configuration initializes and never generates ech=null', async () 
     assert.match(config.LINK, /^vless:\/\//);
     assert.doesNotMatch(config.LINK, /ech=null/);
     assert.equal(config.跳过证书验证, false);
-    assert.deepEqual(config.支持协议, ['vless', 'trojan']);
+    assert.deepEqual(config.支持协议, ['vless', 'trojan', 'shadowsocks']);
+    assert.deepEqual(config.TRANSPORTS, ['ws', 'xhttp', 'grpc']);
+    assert.equal(config.LINKS.length, 7);
+    assert.match(config.LINKS.at(-1), /^ss:\/\//);
     assert.deepEqual(config.客户端DNS, []);
 });
 
@@ -30,4 +33,23 @@ test('VLESS and Trojan links use protocol-appropriate parameters', () => {
     assert.match(vless, /encryption=none/);
     assert.match(trojan, /^trojan:\/\//);
     assert.doesNotMatch(trojan, /encryption=/);
+});
+
+test('transport URIs expose compatible XHTTP and gRPC parameters', () => {
+    const common = {
+        protocol: 'vless',
+        credential: '00000000-0000-4000-8000-000000000000',
+        address: '2001:db8::1',
+        host: 'worker.example',
+        path: '/tunnel',
+    };
+    const xhttp = buildProxyUri({ ...common, transport: 'xhttp' });
+    const grpc = buildProxyUri({ ...common, transport: 'grpc' });
+    assert.match(xhttp, /^vless:\/\/[^@]+@\[2001:db8::1\]:443\?/);
+    assert.match(xhttp, /type=xhttp/);
+    assert.match(xhttp, /mode=stream-one/);
+    assert.match(grpc, /type=grpc/);
+    assert.match(grpc, /serviceName=tunnel/);
+    assert.match(grpc, /mode=gun/);
+    assert.doesNotMatch(grpc, /path=/);
 });

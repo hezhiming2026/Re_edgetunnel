@@ -23,7 +23,20 @@ head_sampling_rate = 0.1
 # [Proxy IP]
 # PROXYIP = "1.2.3.4"
 
-# [Operator-owned DNS for optional VLESS DNS forwarding]
+# [Explicit upstream proxy]
+# Supports socks5://, http://, https://, turn://, turns://, and sstp://
+# Keep URLs containing credentials in a Wrangler secret instead of this file.
+# UPSTREAM_PROXY = "https://user:password@proxy.your-domain.com:443"
+
+# [Bounded connection racing: each value is clamped to 1-4]
+# TCP_CONCURRENT_DIAL = "1"
+# PROXY_CONCURRENT_DIAL = "1"
+
+# [Local connectivity-test handling]
+# SPEEDTEST_MODE = "local" # local or block
+# SPEEDTEST_DOMAINS = "speed.cloudflare.com,cp.cloudflare.com"
+
+# [Operator-owned TCP DNS for VLESS/Trojan DNS and TURN/SSTP target resolution]
 # DNS_RESOLVER = "dns.your-domain.com"
 # DNS_RESOLVER_PORT = "53"
 

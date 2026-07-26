@@ -1,7 +1,7 @@
 # EdgeTunnel
 
 <p align="center">
-  A self-hosted VLESS and Trojan over WebSocket tunnel for Cloudflare Workers.
+  A modular VLESS, Trojan, and Shadowsocks tunnel for Cloudflare Workers.
 </p>
 
 <p align="center">
@@ -13,7 +13,7 @@
 
 <p align="center">
   <img alt="Cloudflare Workers" src="https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white">
-  <img alt="Protocols" src="https://img.shields.io/badge/Protocols-VLESS%20%7C%20Trojan-2563EB">
+  <img alt="Protocols" src="https://img.shields.io/badge/Protocols-VLESS%20%7C%20Trojan%20%7C%20Shadowsocks-2563EB">
   <img alt="Runtime dependencies" src="https://img.shields.io/badge/Runtime_dependencies-operator_controlled-16A34A">
   <img alt="License" src="https://img.shields.io/badge/License-see%20LICENSE-64748B">
 </p>
@@ -23,7 +23,7 @@
 
 ## What this project is
 
-EdgeTunnel is a modular Cloudflare Worker that accepts **VLESS over WebSocket/TLS** and **Trojan over WebSocket/TLS**, then opens outbound TCP connections with Cloudflare's Socket API. Configuration, login sessions, address lists, and request logs are stored in a Workers KV namespace that belongs to the operator.
+EdgeTunnel is a modular Cloudflare Worker that accepts **VLESS and Trojan over WebSocket, XHTTP, or gRPC**, plus **Shadowsocks SIP003 AEAD over WebSocket**. It opens outbound TCP connections with Cloudflare's Socket API, directly or through an explicitly configured upstream proxy. Configuration, login sessions, address lists, and request logs are stored in a Workers KV namespace that belongs to the operator.
 
 The runtime does not download code or an administrator panel from another GitHub repository or CDN. Optional remote services are disabled until the operator explicitly configures endpoints they control.
 
@@ -33,10 +33,19 @@ The runtime does not download code or an administrator panel from another GitHub
 | --- | --- |
 | VLESS over WebSocket/TLS | Supported |
 | Trojan over WebSocket/TLS | Supported |
+| VLESS/Trojan over XHTTP `stream-one` | Supported; bounded streaming request and response |
+| VLESS/Trojan over gRPC Hunk | Supported; fragmented and coalesced frame decoding |
+| Shadowsocks `aes-128-gcm` / `aes-256-gcm` | Supported over WebSocket with SIP003 AEAD framing |
+| Trojan UDP DNS | Supported when an operator-owned TCP DNS resolver is configured |
 | Outbound TCP through Cloudflare Sockets | Supported |
+| SOCKS5, HTTP, HTTPS upstream proxies | Supported |
+| TURN/TURNS RFC 6062 upstream | Implemented for TCP allocation and connection binding |
+| SSTP upstream | Implemented for TLS + PPP PAP/IPCP + IPv4 inner TCP |
 | Password login, KV sessions, logout | Supported |
 | Token-protected subscriptions | Supported |
 | Local address-list subscription | Supported |
+| Bounded direct/proxy connection racing | Supported; request-scoped, `1`-`4` dials |
+| Local HTTP 204 connectivity-test responder | Supported; no outbound speed-test traffic |
 | Mihomo/Clash, Sing-box, Surge conversion | Optional; requires an operator-owned converter |
 | Graphical administrator console | Not implemented yet; the current page exposes local JSON/text endpoints |
 | Native QUIC/UDP protocols such as Hysteria2 and TUIC | Not supported by this Worker architecture |
@@ -48,10 +57,11 @@ The runtime does not download code or an administrator panel from another GitHub
 
 ```mermaid
 flowchart LR
-    C["VLESS / Trojan client"] -->|"TLS + WebSocket"| W["Your Cloudflare Worker"]
+    C["VLESS / Trojan / Shadowsocks client"] -->|"WebSocket, XHTTP, or gRPC"| W["Your Cloudflare Worker"]
     A["Operator browser"] -->|"/login and /admin"| W
     W --> K["Your Workers KV"]
     W -->|"TCP Socket"| D["Requested destination"]
+    W -. "optional upstream" .-> P["SOCKS5 / HTTP(S) / TURN(S) / SSTP"]
     W -. "optional, explicitly configured" .-> O["Operator-owned DNS / converter / APIs"]
 ```
 
@@ -62,7 +72,8 @@ Required runtime services:
 
 Optional integrations, all disabled by default:
 
-- An operator-owned DNS resolver for VLESS DNS forwarding.
+- An operator-owned TCP DNS resolver for VLESS and Trojan DNS forwarding.
+- An operator-selected SOCKS5, HTTP(S), TURN(S), or SSTP upstream proxy.
 - An operator-owned subscription converter and conversion configuration.
 - An operator-owned proxy-check endpoint.
 - An operator-owned location-data endpoint.
@@ -368,7 +379,12 @@ Sensitive values must be stored with `wrangler secret put`. Non-secret operator 
 | `HOST` | No | Comma/newline-separated hostnames used in generated subscriptions |
 | `URL` | No | Root-path camouflage: `nginx`, `1101`, or an explicit HTTPS origin |
 | `PROXYIP` | No | Operator-selected TCP fallback proxy address |
-| `DNS_RESOLVER` | No | Operator-owned DNS resolver for optional VLESS DNS forwarding |
+| `UPSTREAM_PROXY` | No | Absolute `socks5://`, `http://`, `https://`, `turn://`, `turns://`, or `sstp://` upstream URL |
+| `TCP_CONCURRENT_DIAL` | No | Direct TCP race width, clamped to `1`-`4`; default `1` |
+| `PROXY_CONCURRENT_DIAL` | No | Proxy-candidate race width, clamped to `1`-`4`; default `1` |
+| `SPEEDTEST_MODE` | No | `local` (default) returns bounded local HTTP 204 responses; `block` closes the tunnel |
+| `SPEEDTEST_DOMAINS` | No | Comma/newline-separated local-test domains; defaults to `speed.cloudflare.com` and `cp.cloudflare.com` |
+| `DNS_RESOLVER` | No | Operator-owned TCP DNS resolver for VLESS/Trojan DNS and TURN/SSTP target resolution |
 | `DNS_RESOLVER_PORT` | No | DNS resolver port, default `53` |
 | `PROXY_CHECK_HOST` | No | Operator-owned HTTP endpoint host used for proxy tests |
 | `PROXY_CHECK_PORT` | No | Proxy-check endpoint port, default `80` |
@@ -378,6 +394,8 @@ Sensitive values must be stored with `wrangler secret put`. Non-secret operator 
 | `ALLOW_REMOTE_USAGE_API` | No | Must equal `true` before a saved remote usage URL may be requested |
 
 If an optional endpoint is absent, the related feature is disabled. The Worker does not select a hidden public fallback.
+
+Dial settings are parsed per request, never retained as mutable cross-request state. Local speed-test mode opens no outbound socket, accepts split or keep-alive HTTP requests, and enforces header, body, pipeline, and buffer limits.
 
 ## Custom domain
 
@@ -422,19 +440,21 @@ Back up important KV values before destructive configuration changes. At minimum
 
 Supported:
 
-- VLESS over WebSocket with TLS termination at Cloudflare.
-- Trojan over WebSocket with TLS termination at Cloudflare.
+- VLESS and Trojan over WebSocket, XHTTP `stream-one`, and gRPC Hunk, with TLS termination at Cloudflare.
+- Shadowsocks SIP003 AEAD using `aes-128-gcm` or `aes-256-gcm` over WebSocket.
 - TCP destinations reachable through Cloudflare's outbound Socket API.
-- VLESS DNS forwarding only when an operator-owned DNS resolver is configured.
-- SOCKS5 and HTTP CONNECT as optional **upstream** proxies, not inbound client protocols.
+- VLESS and Trojan DNS forwarding only when an operator-owned TCP DNS resolver is configured.
+- SOCKS5, HTTP CONNECT, HTTPS CONNECT, TURN/TURNS RFC 6062, and SSTP as optional **upstream** proxies, not inbound client protocols.
 
 Not supported by this Worker:
 
 - Hysteria2 and TUIC, which require native QUIC/UDP behavior.
 - WireGuard as an inbound tunnel.
 - VLESS Reality, because TLS is terminated by Cloudflare.
-- Native raw-TCP, gRPC, HTTP/2, or HTTP/3 proxy ingress.
-- Arbitrary UDP forwarding; only the explicitly configured VLESS DNS path is handled.
+- Native raw-TCP ingress or a generic HTTP forward proxy.
+- Arbitrary UDP forwarding; only explicitly configured VLESS/Trojan DNS is handled.
+
+TURN support is intentionally scoped to RFC 6062 TCP allocation. SSTP support is scoped to TLS, PPP PAP/IPCP, IPv4, and inner TCP. Servers requiring other authentication methods, IPv6CP, MPPE, or vendor extensions are outside this implementation.
 
 Adding a client output format does not add a new network protocol to the Worker core.
 
@@ -529,7 +549,10 @@ src/
 │   ├── auth.js              # Login, sessions, origin checks, logout
 │   ├── admin.js             # Administrator API routes
 │   └── sub.js               # Subscription generation and conversion
-├── core/proxy.js            # WebSocket and outbound socket lifecycle
+├── core/
+│   ├── dialer.js            # Bounded connection racing and loser cleanup
+│   ├── proxy.js             # WebSocket and outbound socket lifecycle
+│   └── speedtest.js         # Bounded local HTTP 204 responder
 ├── protocols/
 │   ├── parsers.js           # VLESS and Trojan parsing
 │   └── socks5.js            # Optional SOCKS5/HTTP upstream support

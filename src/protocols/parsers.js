@@ -1,6 +1,9 @@
 import { formatIdentifier, sha224 } from '../utils/helpers.js';
 
 export function parseVlessRequest(chunk, token) {
+    if (ArrayBuffer.isView(chunk)) {
+        chunk = chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength);
+    }
     if (chunk.byteLength < 24) return { hasError: true, message: 'Invalid data' };
     const version = new Uint8Array(chunk.slice(0, 1));
     if (formatIdentifier(new Uint8Array(chunk.slice(1, 17))) !== token) return { hasError: true, message: 'Invalid uuid' };
@@ -44,6 +47,9 @@ export function parseVlessRequest(chunk, token) {
 }
 
 export function parseTrojanRequest(buffer, passwordPlainText) {
+    if (ArrayBuffer.isView(buffer)) {
+        buffer = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+    }
     const sha224Password = sha224(passwordPlainText);
     if (buffer.byteLength < 58) return { hasError: true, message: "invalid data" };
     let crLfIndex = 56;
@@ -56,7 +62,7 @@ export function parseTrojanRequest(buffer, passwordPlainText) {
 
     const view = new DataView(socks5DataBuffer);
     const cmd = view.getUint8(0);
-    if (cmd !== 1) return { hasError: true, message: "unsupported command, only TCP is allowed" };
+    if (cmd !== 1 && cmd !== 3) return { hasError: true, message: "unsupported command" };
 
     const atype = view.getUint8(1);
     let addressLength = 0;
@@ -108,6 +114,7 @@ export function parseTrojanRequest(buffer, passwordPlainText) {
         addressType: atype,
         port: portRemote,
         hostname: address,
+        isUDP: cmd === 3,
         rawClientData: socks5DataBuffer.slice(portIndex + 4)
     };
 }

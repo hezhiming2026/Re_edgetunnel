@@ -1,7 +1,7 @@
 # EdgeTunnel
 
 <p align="center">
-  部署在 Cloudflare Workers 上、完全由运维者掌控的 VLESS / Trojan WebSocket 隧道。
+  部署在 Cloudflare Workers 上、完全由运维者掌控的 VLESS / Trojan / Shadowsocks 模块化隧道。
 </p>
 
 <p align="center">
@@ -13,7 +13,7 @@
 
 <p align="center">
   <img alt="Cloudflare Workers" src="https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white">
-  <img alt="协议" src="https://img.shields.io/badge/协议-VLESS%20%7C%20Trojan-2563EB">
+  <img alt="协议" src="https://img.shields.io/badge/协议-VLESS%20%7C%20Trojan%20%7C%20Shadowsocks-2563EB">
   <img alt="运行时依赖" src="https://img.shields.io/badge/运行时依赖-运维者掌控-16A34A">
   <img alt="许可证" src="https://img.shields.io/badge/许可证-见%20LICENSE-64748B">
 </p>
@@ -23,7 +23,7 @@
 
 ## 项目是什么
 
-EdgeTunnel 是一个模块化 Cloudflare Worker。它接收 **VLESS over WebSocket/TLS** 和 **Trojan over WebSocket/TLS** 连接，再通过 Cloudflare Socket API 建立出站 TCP 连接。配置、登录会话、地址列表和请求日志都保存在部署者自己的 Workers KV 中。
+EdgeTunnel 是一个模块化 Cloudflare Worker。它接收 **VLESS/Trojan over WebSocket、XHTTP 或 gRPC**，以及 **Shadowsocks SIP003 AEAD over WebSocket**，再通过 Cloudflare Socket API 直连或经显式配置的上游代理建立出站 TCP。配置、登录会话、地址列表和请求日志都保存在部署者自己的 Workers KV 中。
 
 运行时不会从其他 GitHub 仓库或 CDN 下载代码、后台页面或配置。所有远程扩展默认关闭，只有管理员明确填写自己掌控的服务地址后才会启用。
 
@@ -33,10 +33,19 @@ EdgeTunnel 是一个模块化 Cloudflare Worker。它接收 **VLESS over WebSock
 | --- | --- |
 | VLESS over WebSocket/TLS | 支持 |
 | Trojan over WebSocket/TLS | 支持 |
+| VLESS/Trojan over XHTTP `stream-one` | 支持；请求和响应均为有界流式处理 |
+| VLESS/Trojan over gRPC Hunk | 支持；兼容拆分帧和合并帧 |
+| Shadowsocks `aes-128-gcm` / `aes-256-gcm` | 支持；WebSocket + SIP003 AEAD 分帧 |
+| Trojan UDP DNS | 支持；必须配置自有 TCP DNS |
 | Cloudflare Socket 出站 TCP | 支持 |
+| SOCKS5、HTTP、HTTPS 上游代理 | 支持 |
+| TURN/TURNS RFC 6062 上游 | 已实现 TCP Allocate、Connect 和 ConnectionBind |
+| SSTP 上游 | 已实现 TLS、PPP PAP/IPCP 和 IPv4 内层 TCP |
 | 密码登录、KV 会话、注销 | 支持 |
 | 带 token 的订阅 | 支持 |
 | 本地地址列表订阅 | 支持 |
+| 有界的直连/反代竞速拨号 | 支持；按请求生效，`1`-`4` 路 |
+| 本地 HTTP 204 连通性测速响应 | 支持；不会产生出站测速流量 |
 | Mihomo/Clash、Sing-box、Surge 转换 | 可选；需要管理员自建转换服务 |
 | 图形化管理后台 | 尚未实现；当前页面提供本地 JSON/文本入口 |
 | Hysteria2、TUIC 等原生 QUIC/UDP 协议 | 当前 Worker 架构不支持 |
@@ -48,10 +57,11 @@ EdgeTunnel 是一个模块化 Cloudflare Worker。它接收 **VLESS over WebSock
 
 ```mermaid
 flowchart LR
-    C["VLESS / Trojan 客户端"] -->|"TLS + WebSocket"| W["你的 Cloudflare Worker"]
+    C["VLESS / Trojan / Shadowsocks 客户端"] -->|"WebSocket、XHTTP 或 gRPC"| W["你的 Cloudflare Worker"]
     A["管理员浏览器"] -->|"/login 与 /admin"| W
     W --> K["你的 Workers KV"]
     W -->|"TCP Socket"| D["请求的目标地址"]
+    W -. "可选上游" .-> P["SOCKS5 / HTTP(S) / TURN(S) / SSTP"]
     W -. "显式配置后才启用" .-> O["管理员自有 DNS / 转换器 / API"]
 ```
 
@@ -355,7 +365,12 @@ console.log(response.status, await response.text());
 | `HOST` | 否 | 订阅使用的多个域名，可用逗号或换行分隔 |
 | `URL` | 否 | 根路径伪装：`nginx`、`1101` 或明确的 HTTPS 源站 |
 | `PROXYIP` | 否 | 管理员选择的 TCP 回退代理地址 |
-| `DNS_RESOLVER` | 否 | VLESS DNS 转发使用的自有 DNS |
+| `UPSTREAM_PROXY` | 否 | 完整的 `socks5://`、`http://`、`https://`、`turn://`、`turns://` 或 `sstp://` 上游 URL |
+| `TCP_CONCURRENT_DIAL` | 否 | 直连 TCP 竞速拨号数，限制在 `1`-`4`，默认 `1` |
+| `PROXY_CONCURRENT_DIAL` | 否 | 反代候选竞速拨号数，限制在 `1`-`4`，默认 `1` |
+| `SPEEDTEST_MODE` | 否 | `local`（默认）返回有界的本地 HTTP 204；`block` 直接关闭隧道 |
+| `SPEEDTEST_DOMAINS` | 否 | 本地测速域名，逗号或换行分隔；默认包含 `speed.cloudflare.com` 和 `cp.cloudflare.com` |
+| `DNS_RESOLVER` | 否 | VLESS/Trojan DNS 以及 TURN/SSTP 域名解析使用的自有 TCP DNS |
 | `DNS_RESOLVER_PORT` | 否 | DNS 端口，默认 `53` |
 | `PROXY_CHECK_HOST` | 否 | 代理测试使用的自有 HTTP 端点主机 |
 | `PROXY_CHECK_PORT` | 否 | 检测端口，默认 `80` |
@@ -365,6 +380,8 @@ console.log(response.status, await response.text());
 | `ALLOW_REMOTE_USAGE_API` | 否 | 必须为 `true` 才允许请求已保存的远程用量 API |
 
 没有配置可选端点时，对应功能会关闭，不会自动选择隐藏的公共服务。
+
+拨号参数按请求解析，不会保存在可跨请求污染的可变全局状态中。本地测速模式不会建立出站 Socket，支持分片及 keep-alive HTTP 请求，并对请求头、请求体、流水线数量和缓存大小设置硬限制。
 
 ## 绑定自定义域名
 
@@ -407,19 +424,21 @@ npx wrangler rollback
 
 支持：
 
-- VLESS over WebSocket，由 Cloudflare 终止 TLS。
-- Trojan over WebSocket，由 Cloudflare 终止 TLS。
+- VLESS/Trojan over WebSocket、XHTTP `stream-one` 和 gRPC Hunk，由 Cloudflare 终止 TLS。
+- Shadowsocks SIP003 AEAD over WebSocket，支持 `aes-128-gcm` 和 `aes-256-gcm`。
 - Cloudflare Socket API 可以访问的 TCP 目标。
-- 配置自有 DNS 后的 VLESS DNS 转发。
-- SOCKS5 和 HTTP CONNECT 作为可选上游代理，不是客户端入站协议。
+- 配置自有 TCP DNS 后的 VLESS/Trojan DNS 转发。
+- SOCKS5、HTTP CONNECT、HTTPS CONNECT、TURN/TURNS RFC 6062 和 SSTP 可作为上游代理，不是客户端入站协议。
 
 不支持：
 
 - 需要原生 QUIC/UDP 的 Hysteria2、TUIC。
 - WireGuard 入站隧道。
 - VLESS Reality，因为 TLS 在 Cloudflare 终止。
-- 原生 TCP、gRPC、HTTP/2 或 HTTP/3 代理入站。
-- 任意 UDP 转发；只处理明确配置的 VLESS DNS 路径。
+- 原生 TCP 入站或通用 HTTP 正向代理。
+- 任意 UDP 转发；只处理明确配置的 VLESS/Trojan DNS。
+
+TURN 明确限定为 RFC 6062 TCP Allocate/Connect。SSTP 明确限定为 TLS、PPP PAP/IPCP、IPv4 和内层 TCP；要求其他认证、IPv6CP、MPPE 或厂商扩展的服务器不在当前实现范围内。
 
 增加客户端输出格式，不等于 Worker 核心增加了新的网络协议。
 
