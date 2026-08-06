@@ -1,20 +1,20 @@
-name: Deploy Cloudflare Worker
+name: Validate and Deploy Cloudflare Worker
 
 on:
+  pull_request:
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
   contents: read
 
-concurrency:
-  group: deploy-cloudflare-production
-  cancel-in-progress: false
-
 jobs:
-  deploy:
-    name: Deploy edge.tianbufu.click
+  validate:
+    name: Validate source
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
 
     steps:
       - name: Check out repository
@@ -25,10 +25,24 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Validate source
+      - name: Run tests and syntax checks
         run: |
           npm test
           npm run check
+
+  deploy:
+    name: Deploy edge.tianbufu.click
+    if: github.event_name == 'workflow_dispatch'
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: deploy-cloudflare-production
+      cancel-in-progress: false
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
 
       - name: Provision production KV and prepare Wrangler config
         env:
