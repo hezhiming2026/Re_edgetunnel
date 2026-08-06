@@ -1,0 +1,67 @@
+name: Deploy Cloudflare Worker
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-cloudflare-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy edge.tianbufu.click
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Validate source
+        run: |
+          npm test
+          npm run check
+
+      - name: Provision production KV and prepare Wrangler config
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          KV_NAMESPACE_TITLE: tianbufu-edge-production
+        run: bash scripts/prepare-cloudflare-config.sh
+
+      - name: Deploy Worker and upload runtime secrets
+        id: deploy
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: "4"
+          command: deploy --config wrangler.deploy.toml
+          secrets: |
+            ADMIN
+            UUID
+        env:
+          ADMIN: ${{ secrets.EDGETUNNEL_ADMIN }}
+          UUID: ${{ secrets.EDGETUNNEL_UUID }}
+
+      - name: Verify custom domain
+        shell: bash
+        run: |
+          for attempt in {1..18}; do
+            if curl --fail --silent --show-error --max-time 15 https://edge.tianbufu.click/ >/dev/null; then
+              echo "edge.tianbufu.click is responding over HTTPS."
+              exit 0
+            fi
+            echo "Custom domain is not ready yet; retry ${attempt}/18."
+            sleep 10
+          done
+          echo "Deployment completed, but the custom domain did not become reachable during the verification window." >&2
+          exit 1
