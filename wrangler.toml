@@ -1,56 +1,28 @@
-name = "edgetunnel"
+name = "tianbufu-edge"
 main = "src/index.js"
-compatibility_date = "2026-07-21"
+compatibility_date = "2026-08-06"
+workers_dev = false
 
 [observability]
 enabled = true
 
 [observability.logs]
-head_sampling_rate = 0.1
+head_sampling_rate = 0.01
 
-# [Routes]
-# Uncomment and replace with your own domain
-# routes = [
-# 	{ pattern = "your-domain.com", custom_domain = true }
-# ]
+[[routes]]
+pattern = "edge.tianbufu.click"
+custom_domain = true
 
 [vars]
-# [Secrets: do not place ADMIN, UUID, KEY, or API tokens in this file]
-# Configure credentials interactively after the first deployment:
-# npx wrangler secret put ADMIN
-# npx wrangler secret put UUID
+HOST = "edge.tianbufu.click"
+TCP_CONCURRENT_DIAL = "1"
+PROXY_CONCURRENT_DIAL = "1"
+SPEEDTEST_MODE = "local"
+SPEEDTEST_DOMAINS = "speed.cloudflare.com,cp.cloudflare.com"
 
-# [Proxy IP]
-# PROXYIP = "1.2.3.4"
+# ADMIN and UUID are Worker secrets. Never store them in this file.
+# The deployment workflow uploads them from GitHub Actions secrets.
 
-# [Explicit upstream proxy]
-# Supports socks5://, http://, https://, turn://, turns://, and sstp://
-# Keep URLs containing credentials in a Wrangler secret instead of this file.
-# UPSTREAM_PROXY = "https://user:password@proxy.your-domain.com:443"
-
-# [Bounded connection racing: each value is clamped to 1-4]
-# TCP_CONCURRENT_DIAL = "1"
-# PROXY_CONCURRENT_DIAL = "1"
-
-# [Local connectivity-test handling]
-# SPEEDTEST_MODE = "local" # local or block
-# SPEEDTEST_DOMAINS = "speed.cloudflare.com,cp.cloudflare.com"
-
-# [Operator-owned TCP DNS for VLESS/Trojan DNS and TURN/SSTP target resolution]
-# DNS_RESOLVER = "dns.your-domain.com"
-# DNS_RESOLVER_PORT = "53"
-
-# [Operator-owned HTTP endpoint for SOCKS5/HTTP proxy checks]
-# PROXY_CHECK_HOST = "check.your-domain.com"
-# PROXY_CHECK_PORT = "80"
-# PROXY_CHECK_PATH = "/trace"
-
-# [Operator-owned HTTPS location data endpoint]
-# LOCATIONS_API = "https://locations.your-domain.com/locations.json"
-
-# [KV Namespace]
-# Run `npx wrangler kv namespace create edgetunnel` to get the ID
-# Replace "your-kv-id-here" with the ID you got
 [[kv_namespaces]]
 binding = "KV"
 id = "your-kv-id-here"
