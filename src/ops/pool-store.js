@@ -93,11 +93,8 @@ export function getOptimizerCoordinator(env) {
 }
 
 export async function readOptimizerAddTxt(env) {
-    try {
-        const stub = getOptimizerCoordinator(env);
-        const value = await stub.getAddTxt();
-        return typeof value === 'string' && value.trim() ? value : null;
-    } catch {
-        return null;
-    }
+    const namespace = env?.OPTIMIZER_COORDINATOR;
+    if (!namespace || typeof namespace.getByName !== 'function') return null;
+    const value = await namespace.getByName('optimizer-pool-v1').getAddTxt();
+    return typeof value === 'string' && value.trim() ? value : null;
 }
