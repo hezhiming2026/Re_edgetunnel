@@ -8,7 +8,8 @@ ZONE_NAME="${ZONE_NAME:-tianbufu.click}"
 EDGE_HOSTNAME="${EDGE_HOSTNAME:-edge.tianbufu.click}"
 API_ROOT="https://api.cloudflare.com/client/v4"
 AUTH_HEADER="Authorization: Bearer ${CLOUDFLARE_API_TOKEN}"
-RULE_REF="edgetunnel_security_level_off"
+CONFIG_RULE_REF="edgetunnel_security_level_essentially_off"
+SKIP_RULE_REF="edgetunnel_skip_security_level"
 
 cf_request() {
   local method="$1"
@@ -64,52 +65,97 @@ if [[ ! "$zone_id" =~ ^[0-9a-fA-F]{32}$ ]]; then
 fi
 
 rulesets_response="$(cf_request GET "/zones/${zone_id}/rulesets")" || {
-  echo 'Unable to read Configuration Rules. Add Config Settings Read/Write or Zone WAF Read/Write to the API token.' >&2
+  echo 'Unable to list zone rulesets. The API token needs Config Rules Edit and Zone WAF Edit.' >&2
   exit 1
 }
 
-ruleset_id="$(jq -r '.result[]? | select(.kind == "zone" and .phase == "http_config_settings") | .id' \
+# Keep a hostname-scoped Configuration Rule as a conservative compatibility layer.
+config_ruleset_id="$(jq -r '.result[]? | select(.kind == "zone" and .phase == "http_config_settings") | .id' \
   <<<"$rulesets_response" | head -n 1)"
 
-rule_payload="$(jq -nc --arg host "$EDGE_HOSTNAME" --arg ref "$RULE_REF" '{
+config_rule_payload="$(jq -nc --arg host "$EDGE_HOSTNAME" --arg ref "$CONFIG_RULE_REF" '{
   action: "set_config",
   expression: ("http.host eq \"" + $host + "\""),
-  description: "Disable Under Attack/Security Level challenge only for the EdgeTunnel hostname",
+  description: "Reduce Security Level only for the EdgeTunnel hostname",
   ref: $ref,
   enabled: true,
   action_parameters: {security_level: "essentially_off"}
 }')"
 
-if [[ -z "$ruleset_id" ]]; then
-  create_payload="$(jq -nc --argjson rule "$rule_payload" '{
+if [[ -z "$config_ruleset_id" ]]; then
+  config_create_payload="$(jq -nc --argjson rule "$config_rule_payload" '{
     name: "tianbufu configuration rules",
     description: "Hostname-scoped Cloudflare configuration overrides managed by Re_edgetunnel",
     kind: "zone",
     phase: "http_config_settings",
     rules: [$rule]
   }')"
-
-  cf_request POST "/zones/${zone_id}/rulesets" "$create_payload" >/dev/null || {
-    echo 'Unable to create the Configuration Rule. The current Cloudflare plan may not permit this Security Level override.' >&2
+  cf_request POST "/zones/${zone_id}/rulesets" "$config_create_payload" >/dev/null || {
+    echo 'Unable to create the Configuration Rule. Ensure Config Rules Edit is present on the API token.' >&2
     exit 1
   }
-  echo "Created Security Level override for ${EDGE_HOSTNAME} (essentially_off)."
-  exit 0
+  echo "Created Security Level compatibility override for ${EDGE_HOSTNAME} (essentially_off)."
+else
+  config_ruleset_response="$(cf_request GET "/zones/${zone_id}/rulesets/${config_ruleset_id}")"
+  config_rule_id="$(jq -r --arg ref "$CONFIG_RULE_REF" --arg legacy "edgetunnel_security_level_off" \
+    '.result.rules[]? | select(.ref == $ref or .ref == $legacy) | .id' <<<"$config_ruleset_response" | head -n 1)"
+  if [[ -n "$config_rule_id" ]]; then
+    cf_request PATCH "/zones/${zone_id}/rulesets/${config_ruleset_id}/rules/${config_rule_id}" "$config_rule_payload" >/dev/null || {
+      echo 'Unable to update the Configuration Rule. Ensure Config Rules Edit is present on the API token.' >&2
+      exit 1
+    }
+    echo "Updated Security Level compatibility override for ${EDGE_HOSTNAME} (essentially_off)."
+  else
+    cf_request POST "/zones/${zone_id}/rulesets/${config_ruleset_id}/rules" "$config_rule_payload" >/dev/null || {
+      echo 'Unable to add the Configuration Rule. Ensure Config Rules Edit is present on the API token.' >&2
+      exit 1
+    }
+    echo "Added Security Level compatibility override for ${EDGE_HOSTNAME} (essentially_off)."
+  fi
 fi
 
-ruleset_response="$(cf_request GET "/zones/${zone_id}/rulesets/${ruleset_id}")"
-rule_id="$(jq -r --arg ref "$RULE_REF" '.result.rules[]? | select(.ref == $ref) | .id' <<<"$ruleset_response" | head -n 1)"
+# The definitive non-browser fix: skip only the Security Level product for this hostname.
+rulesets_response="$(cf_request GET "/zones/${zone_id}/rulesets")"
+custom_ruleset_id="$(jq -r '.result[]? | select(.kind == "zone" and .phase == "http_request_firewall_custom") | .id' \
+  <<<"$rulesets_response" | head -n 1)"
 
-if [[ -n "$rule_id" ]]; then
-  cf_request PATCH "/zones/${zone_id}/rulesets/${ruleset_id}/rules/${rule_id}" "$rule_payload" >/dev/null || {
-    echo 'Unable to update the Configuration Rule. The current Cloudflare plan may not permit this Security Level override.' >&2
+skip_rule_payload="$(jq -nc --arg host "$EDGE_HOSTNAME" --arg ref "$SKIP_RULE_REF" '{
+  action: "skip",
+  expression: ("http.host eq \"" + $host + "\""),
+  description: "Skip only Cloudflare Security Level for the EdgeTunnel hostname",
+  ref: $ref,
+  enabled: true,
+  action_parameters: {products: ["securityLevel"]}
+}')"
+
+if [[ -z "$custom_ruleset_id" ]]; then
+  custom_create_payload="$(jq -nc --argjson rule "$skip_rule_payload" '{
+    name: "tianbufu custom security rules",
+    description: "Hostname-scoped WAF custom rules managed by Re_edgetunnel",
+    kind: "zone",
+    phase: "http_request_firewall_custom",
+    rules: [$rule]
+  }')"
+  cf_request POST "/zones/${zone_id}/rulesets" "$custom_create_payload" >/dev/null || {
+    echo 'Unable to create the Security Level skip rule. Add Zone -> WAF -> Edit to the Cloudflare API token.' >&2
     exit 1
   }
-  echo "Updated Security Level override for ${EDGE_HOSTNAME} (essentially_off)."
+  echo "Created Security Level skip rule for ${EDGE_HOSTNAME}."
 else
-  cf_request POST "/zones/${zone_id}/rulesets/${ruleset_id}/rules" "$rule_payload" >/dev/null || {
-    echo 'Unable to add the Configuration Rule. The current Cloudflare plan may not permit this Security Level override.' >&2
-    exit 1
-  }
-  echo "Added Security Level override for ${EDGE_HOSTNAME} (essentially_off)."
+  custom_ruleset_response="$(cf_request GET "/zones/${zone_id}/rulesets/${custom_ruleset_id}")"
+  skip_rule_id="$(jq -r --arg ref "$SKIP_RULE_REF" '.result.rules[]? | select(.ref == $ref) | .id' \
+    <<<"$custom_ruleset_response" | head -n 1)"
+  if [[ -n "$skip_rule_id" ]]; then
+    cf_request PATCH "/zones/${zone_id}/rulesets/${custom_ruleset_id}/rules/${skip_rule_id}" "$skip_rule_payload" >/dev/null || {
+      echo 'Unable to update the Security Level skip rule. Add Zone -> WAF -> Edit to the Cloudflare API token.' >&2
+      exit 1
+    }
+    echo "Updated Security Level skip rule for ${EDGE_HOSTNAME}."
+  else
+    cf_request POST "/zones/${zone_id}/rulesets/${custom_ruleset_id}/rules" "$skip_rule_payload" >/dev/null || {
+      echo 'Unable to add the Security Level skip rule. Add Zone -> WAF -> Edit to the Cloudflare API token.' >&2
+      exit 1
+    }
+    echo "Added Security Level skip rule for ${EDGE_HOSTNAME}."
+  fi
 fi
