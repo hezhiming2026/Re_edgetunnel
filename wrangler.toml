@@ -27,6 +27,14 @@ EGRESS_FIRST_BYTE_TIMEOUT_MS = "8000"
 # ADMIN, UUID, OPTIMIZER_TOKEN, and DIAGNOSTIC_TARGETS are Worker secrets.
 # Keep real diagnostic target hostnames outside committed configuration.
 
+[[durable_objects.bindings]]
+name = "OPTIMIZER_COORDINATOR"
+class_name = "OptimizerCoordinator"
+
+[exports.OptimizerCoordinator]
+type = "durable-object"
+storage = "sqlite"
+
 [[kv_namespaces]]
 binding = "KV"
 id = "your-kv-id-here"
