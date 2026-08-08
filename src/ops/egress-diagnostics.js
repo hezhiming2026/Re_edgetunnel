@@ -1,9 +1,47 @@
+const MAX_DIAGNOSTIC_BODY_BYTES = 4096;
+const SYNTHETIC_CONNECT_TIMEOUT_MS = 3000;
+
 function defaultNow() {
     return Date.now();
 }
 
 function defaultRecord(event) {
     console.log(JSON.stringify({ type: 'egress_diagnostic', ...event }));
+}
+
+function jsonResponse(body, status = 200) {
+    return new Response(JSON.stringify(body), {
+        status,
+        headers: {
+            'Content-Type': 'application/json;charset=utf-8',
+            'Cache-Control': 'no-store',
+        },
+    });
+}
+
+async function readDiagnosticRequest(request) {
+    const declaredLength = Number(request.headers.get('content-length'));
+    if (Number.isFinite(declaredLength) && declaredLength > MAX_DIAGNOSTIC_BODY_BYTES) {
+        return { error: jsonResponse({ error: 'Request body is too large' }, 413) };
+    }
+    const text = await request.text();
+    if (new TextEncoder().encode(text).byteLength > MAX_DIAGNOSTIC_BODY_BYTES) {
+        return { error: jsonResponse({ error: 'Request body is too large' }, 413) };
+    }
+    let body;
+    try {
+        body = JSON.parse(text || '{}');
+    } catch {
+        return { error: jsonResponse({ error: 'Invalid JSON body' }, 400) };
+    }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        return { error: jsonResponse({ error: 'Invalid request body' }, 400) };
+    }
+    const keys = Object.keys(body);
+    if (keys.length !== 1 || keys[0] !== 'target' || typeof body.target !== 'string') {
+        return { error: jsonResponse({ error: 'Only a configured target key is accepted' }, 400) };
+    }
+    return { targetKey: body.target.trim().toLowerCase() };
 }
 
 export function findDiagnosticTargetKey(hostname, port, diagnosticTargets) {
@@ -83,4 +121,40 @@ export function createEgressObserver({
             terminal = true;
         },
     };
+}
+
+export async function handleEgressDiagnose(request, env, proxyConfig, deps = {}) {
+    if (request.method !== 'POST') return jsonResponse({ error: 'Method Not Allowed' }, 405);
+    const parsed = await readDiagnosticRequest(request);
+    if (parsed.error) return parsed.error;
+
+    const targets = proxyConfig?.diagnosticTargets;
+    const target = targets instanceof Map ? targets.get(parsed.targetKey) : null;
+    if (!target) return jsonResponse({ error: 'Unknown diagnostic target' }, 404);
+    if (typeof deps.directDial !== 'function') return jsonResponse({ error: 'Direct diagnostic dialer is not configured' }, 503);
+
+    const now = typeof deps.now === 'function' ? deps.now : defaultNow;
+    const startedAt = now();
+    let socket = null;
+    let direct;
+    try {
+        socket = await deps.directDial(target, SYNTHETIC_CONNECT_TIMEOUT_MS);
+        direct = {
+            state: 'ok',
+            elapsed_ms: Math.max(0, Math.round(now() - startedAt)),
+        };
+    } catch {
+        direct = {
+            state: 'error',
+            elapsed_ms: Math.max(0, Math.round(now() - startedAt)),
+        };
+    } finally {
+        try { await socket?.close?.(); } catch { }
+    }
+
+    return jsonResponse({
+        target: parsed.targetKey,
+        direct,
+        nas: { state: 'not_configured' },
+    });
 }
