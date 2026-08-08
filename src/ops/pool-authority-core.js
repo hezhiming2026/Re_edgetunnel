@@ -113,6 +113,21 @@ export function readAuthoritativePoolStatus(storage) {
     };
 }
 
+export function readAuthoritativeAddState(storage) {
+    const manualAddTxt = storage.kv.get('manual_add_txt');
+    const optimizerAddTxt = storage.kv.get('add_txt');
+    const current = storage.kv.get('current') ?? null;
+    const initialized = storage.kv.get('manual_add_initialized') === true
+        || current !== null
+        || manualAddTxt !== undefined
+        || optimizerAddTxt !== undefined;
+
+    return {
+        initialized,
+        add_txt: manualAddTxt ?? optimizerAddTxt ?? null,
+    };
+}
+
 export function readAuthoritativeAddTxt(storage) {
-    return storage.kv.get('manual_add_txt') ?? storage.kv.get('add_txt') ?? null;
+    return readAuthoritativeAddState(storage).add_txt;
 }
