@@ -4,12 +4,27 @@ import {
     rollbackAuthoritativePool,
     readAuthoritativeAddTxt,
     readAuthoritativePoolStatus,
+    setManualAuthoritativeAddTxt,
 } from './pool-authority-core.js';
 
 export class OptimizerCoordinator extends DurableObject {
     constructor(ctx, env) {
         super(ctx, env);
         this.env = env;
+    }
+
+    async mirrorEffectiveAddTxt() {
+        if (!this.env?.KV) return 'unavailable';
+        try {
+            const effectiveAddTxt = readAuthoritativeAddTxt(this.ctx.storage);
+            if (effectiveAddTxt) await this.env.KV.put('ADD.txt', effectiveAddTxt);
+            else if (typeof this.env.KV.delete === 'function') await this.env.KV.delete('ADD.txt');
+            else await this.env.KV.put('ADD.txt', '');
+            return 'ok';
+        } catch (error) {
+            console.warn(`Optimizer ADD.txt KV mirror degraded: ${error?.message || 'unknown error'}`);
+            return 'degraded';
+        }
     }
 
     async mirror(result) {
@@ -19,7 +34,9 @@ export class OptimizerCoordinator extends DurableObject {
             await this.env.KV.put(`optimizer:pool:${result.snapshot.revision}`, JSON.stringify(result.snapshot));
             if (status.previous) await this.env.KV.put('optimizer:previous', status.previous);
             await this.env.KV.put('optimizer:current', status.current);
-            await this.env.KV.put('ADD.txt', result.add_txt);
+            const effectiveAddTxt = readAuthoritativeAddTxt(this.ctx.storage);
+            if (effectiveAddTxt) await this.env.KV.put('ADD.txt', effectiveAddTxt);
+            else if (typeof this.env.KV.delete === 'function') await this.env.KV.delete('ADD.txt');
             await this.env.KV.put('optimizer:status', JSON.stringify(status.status));
             return 'ok';
         } catch (error) {
@@ -52,6 +69,12 @@ export class OptimizerCoordinator extends DurableObject {
             previous: result.previous,
             mirror,
         };
+    }
+
+    async setManualAddTxt(value) {
+        const effectiveAddTxt = setManualAuthoritativeAddTxt(this.ctx.storage, value);
+        await this.mirrorEffectiveAddTxt();
+        return effectiveAddTxt;
     }
 
     getStatus() {
