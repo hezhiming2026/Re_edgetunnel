@@ -116,6 +116,16 @@ Stage A response reports only the target key, direct TCP state/timing, and `nas.
 
 For real proxy sessions, configured diagnostic targets may emit only bounded events such as `direct_open_ok`, `direct_open_error`, `direct_closed_before_byte`, `direct_first_byte_ok`, and `direct_first_byte_timeout`, with target key and elapsed time. They must remain direct-only in Stage A.
 
+### Capture real-session events with Real-time Logs
+
+Persisted Workers Logs use the production head sampling rate and are not authoritative for a short diagnostic session. During a controlled test window, use Cloudflare Real-time Logs or Wrangler tail with an explicit 100% tail sampling rate and filter for the bounded diagnostic event marker:
+
+```bash
+npx wrangler tail --sampling-rate 1 --search egress_diagnostic
+```
+
+Start the real-time session first, reproduce the configured target through the actual proxy client, then close the client connection so WebSocket-handler logs are flushed. Do not raise the production persisted log sampling rate merely to run this diagnostic.
+
 ## Exit gate
 
 Stage A is ready for the next stage only when all of these are true:
