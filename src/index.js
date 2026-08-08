@@ -16,6 +16,8 @@ import { handleEgressDiagnose } from './ops/egress-diagnostics.js';
 import { parseEgressRuntimeConfig } from './ops/egress-policy.js';
 import { handleOptimizerRequest } from './ops/optimizer-api.js';
 
+export { OptimizerCoordinator } from './ops/optimizer-coordinator.js';
+
 export default {
     async fetch(request, env, ctx) {
         const url = new URL(request.url);
@@ -55,6 +57,16 @@ export default {
             ...parseEgressRuntimeConfig(env),
         });
 
+        // Machine-only routes are reserved before every tunnel/protocol dispatcher.
+        if (pathLower === 'ops' || pathLower.startsWith('ops/')) {
+            const authenticated = await authenticateMachineRequest(request, env);
+            if (!authenticated) return machineUnauthorized();
+            if (pathLower === 'ops/egress/v1/diagnose') {
+                return handleEgressDiagnose(request, env, createProxyConfig(), { directDial: directDiagnosticDial });
+            }
+            return handleOptimizerRequest(request, env, pathLower);
+        }
+
         // --- WS Handling ---
         if (upgradeHeader === 'websocket') {
             if (adminPassword) {
@@ -77,15 +89,6 @@ export default {
 
         // --- HTTP Handling ---
         if (url.protocol === 'http:') return Response.redirect(url.href.replace('http:', 'https:'), 301);
-
-        if (pathLower === 'ops' || pathLower.startsWith('ops/')) {
-            const authenticated = await authenticateMachineRequest(request, env);
-            if (!authenticated) return machineUnauthorized();
-            if (pathLower === 'ops/egress/v1/diagnose') {
-                return handleEgressDiagnose(request, env, createProxyConfig(), { directDial: directDiagnosticDial });
-            }
-            return handleOptimizerRequest(request, env, pathLower);
-        }
 
         if (!adminPassword) return new Response('Administrator password is not configured.', { status: 503 });
 
