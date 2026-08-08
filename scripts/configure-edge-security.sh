@@ -8,7 +8,7 @@ ZONE_NAME="${ZONE_NAME:-tianbufu.click}"
 EDGE_HOSTNAME="${EDGE_HOSTNAME:-edge.tianbufu.click}"
 API_ROOT="https://api.cloudflare.com/client/v4"
 AUTH_HEADER="Authorization: Bearer ${CLOUDFLARE_API_TOKEN}"
-CONFIG_RULE_REF="edgetunnel_security_level_essentially_off"
+CONFIG_RULE_REF="edgetunnel_security_level_off"
 SKIP_RULE_REF="edgetunnel_skip_security_level"
 
 cf_request() {
@@ -97,8 +97,7 @@ if [[ -z "$config_ruleset_id" ]]; then
   echo "Created Security Level compatibility override for ${EDGE_HOSTNAME} (essentially_off)."
 else
   config_ruleset_response="$(cf_request GET "/zones/${zone_id}/rulesets/${config_ruleset_id}")"
-  config_rule_id="$(jq -r --arg ref "$CONFIG_RULE_REF" --arg legacy "edgetunnel_security_level_off" \
-    '.result.rules[]? | select(.ref == $ref or .ref == $legacy) | .id' <<<"$config_ruleset_response" | head -n 1)"
+  config_rule_id="$(jq -r --arg ref "$CONFIG_RULE_REF" '.result.rules[]? | select(.ref == $ref) | .id' <<<"$config_ruleset_response" | head -n 1)"
   if [[ -n "$config_rule_id" ]]; then
     cf_request PATCH "/zones/${zone_id}/rulesets/${config_ruleset_id}/rules/${config_rule_id}" "$config_rule_payload" >/dev/null || {
       echo 'Unable to update the Configuration Rule. Ensure Config Rules Edit is present on the API token.' >&2
