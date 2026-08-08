@@ -98,3 +98,16 @@ export async function readOptimizerAddTxt(env) {
     const value = await namespace.getByName('optimizer-pool-v1').getAddTxt();
     return typeof value === 'string' && value.trim() ? value : null;
 }
+
+export async function writeManualAddTxt(env, value) {
+    const text = typeof value === 'string' ? value : '';
+    const namespace = env?.OPTIMIZER_COORDINATOR;
+    if (!namespace || typeof namespace.getByName !== 'function') {
+        if (!env?.KV || typeof env.KV.put !== 'function') {
+            throw new PoolStoreError('ADD.txt storage is unavailable', 503);
+        }
+        await env.KV.put('ADD.txt', text);
+        return text;
+    }
+    return namespace.getByName('optimizer-pool-v1').setManualAddTxt(text);
+}
