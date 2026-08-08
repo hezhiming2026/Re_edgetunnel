@@ -86,6 +86,14 @@ jobs:
           ADMIN: ${{ secrets.EDGETUNNEL_ADMIN }}
           UUID: ${{ secrets.EDGETUNNEL_UUID }}
 
+      - name: Configure hostname Security Level override
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          ZONE_NAME: tianbufu.click
+          EDGE_HOSTNAME: edge.tianbufu.click
+        run: bash scripts/configure-edge-security.sh
+
       - name: Verify custom domain
         shell: bash
         run: |
