@@ -33,3 +33,11 @@ test('subscription honors initialized durable clear before legacy KV fallback', 
     assert.match(subSource, /authorityState\.initialized\s*\?\s*authorityState\.add_txt\s*:\s*await\s+env\.KV\.get\(['"]ADD\.txt['"]\)/);
     assert.doesNotMatch(subSource, /authoritativeAddTxt\s*\|\|\s*await\s+env\.KV\.get\(['"]ADD\.txt['"]\)/);
 });
+
+test('admin ADD read honors initialized durable clear before legacy KV fallback', async () => {
+    const adminSource = await readFile(new URL('../../src/controllers/admin.js', import.meta.url), 'utf8');
+
+    assert.match(adminSource, /readOptimizerAddState/);
+    assert.match(adminSource, /authorityState\.initialized\s*\?\s*authorityState\.add_txt\s*:\s*await\s+env\.KV\.get\(['"]ADD\.txt['"]\)/);
+    assert.doesNotMatch(adminSource, /if\s*\(!localIPs\)\s*localIPs\s*=\s*await\s+env\.KV\.get\(['"]ADD\.txt['"]\)/);
+});
