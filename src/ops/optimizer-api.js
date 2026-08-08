@@ -1,9 +1,10 @@
 import {
     PoolStoreError,
+    buildPoolSnapshot,
+    formatAddTxt,
+    getOptimizerCoordinator,
     parseAllowedCidrs,
-    publishPool,
-    readPoolStatus,
-    rollbackPool,
+    validatePoolEntries,
 } from './pool-store.js';
 
 const MAX_JSON_BODY_BYTES = 16 * 1024;
@@ -63,6 +64,25 @@ function allowedCidrsFromEnv(env) {
     }
 }
 
+function validateExpectedRevision(body) {
+    if (!body || typeof body !== 'object' || !Object.hasOwn(body, 'expected_current_revision')) {
+        throw new PoolStoreError('expected_current_revision is required', 400);
+    }
+    if (body.expected_current_revision !== null && typeof body.expected_current_revision !== 'string') {
+        throw new PoolStoreError('expected_current_revision must be a string or null', 400);
+    }
+}
+
+function coordinatorResultResponse(result) {
+    if (!result?.ok) return jsonResponse({ error: result?.error || 'Optimizer mutation failed' }, result?.status || 500);
+    return jsonResponse({
+        revision: result.revision,
+        checksum: result.checksum,
+        previous: result.previous ?? null,
+        mirror: result.mirror || 'unknown',
+    });
+}
+
 export async function handleOptimizerRequest(request, env, pathLower) {
     try {
         if (pathLower === 'ops/optimizer/v1/probe') {
@@ -70,23 +90,40 @@ export async function handleOptimizerRequest(request, env, pathLower) {
             return buildOptimizerProbeResponse();
         }
 
+        const coordinator = getOptimizerCoordinator(env);
+
         if (pathLower === 'ops/optimizer/v1/status') {
             if (request.method !== 'GET') return jsonResponse({ error: 'Method Not Allowed' }, 405);
-            return jsonResponse(await readPoolStatus(env));
+            return jsonResponse(await coordinator.getStatus());
         }
 
         if (pathLower === 'ops/optimizer/v1/pool') {
             if (request.method !== 'PUT') return jsonResponse({ error: 'Method Not Allowed' }, 405);
             const body = await readBoundedJson(request);
-            const result = await publishPool(env, body, allowedCidrsFromEnv(env));
-            return jsonResponse(result);
+            validateExpectedRevision(body);
+            let entries;
+            try {
+                entries = validatePoolEntries(body.entries, allowedCidrsFromEnv(env));
+            } catch (error) {
+                throw new PoolStoreError(error.message, 400);
+            }
+            const snapshot = await buildPoolSnapshot(entries);
+            const result = await coordinator.publishPool({
+                expected_current_revision: body.expected_current_revision,
+                snapshot,
+                add_txt: formatAddTxt(entries),
+            });
+            return coordinatorResultResponse(result);
         }
 
         if (pathLower === 'ops/optimizer/v1/rollback') {
             if (request.method !== 'POST') return jsonResponse({ error: 'Method Not Allowed' }, 405);
             const body = await readBoundedJson(request);
-            const result = await rollbackPool(env, body.expected_current_revision);
-            return jsonResponse(result);
+            validateExpectedRevision(body);
+            if (typeof body.expected_current_revision !== 'string' || !body.expected_current_revision) {
+                throw new PoolStoreError('expected_current_revision is required', 400);
+            }
+            return coordinatorResultResponse(await coordinator.rollbackPool(body.expected_current_revision));
         }
 
         return jsonResponse({ error: 'Not Found' }, 404);
