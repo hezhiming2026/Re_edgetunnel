@@ -11,6 +11,7 @@ import { parseSpeedTestDomains, parseSpeedTestMode } from './core/speedtest.js';
 import { handleGrpcRequest, handleXHttpRequest } from './core/http-tunnel.js';
 import { parseUpstreamProxy } from './protocols/upstream.js';
 import { authenticateMachineRequest, machineUnauthorized } from './ops/auth.js';
+import { handleOptimizerRequest } from './ops/optimizer-api.js';
 
 export default {
     async fetch(request, env, ctx) {
@@ -76,13 +77,7 @@ export default {
         if (pathLower === 'ops' || pathLower.startsWith('ops/')) {
             const authenticated = await authenticateMachineRequest(request, env);
             if (!authenticated) return machineUnauthorized();
-            return new Response(JSON.stringify({ error: 'Not Found' }), {
-                status: 404,
-                headers: {
-                    'Content-Type': 'application/json;charset=utf-8',
-                    'Cache-Control': 'no-store',
-                },
-            });
+            return handleOptimizerRequest(request, env, pathLower);
         }
 
         if (!adminPassword) return new Response('Administrator password is not configured.', { status: 503 });
