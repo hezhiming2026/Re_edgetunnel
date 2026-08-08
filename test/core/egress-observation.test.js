@@ -18,6 +18,7 @@ function harness() {
         observer,
         events,
         advance(ms) { clock += ms; },
+        hasTimer() { return scheduled !== null; },
         fireTimer() { const fn = scheduled; scheduled = null; fn?.(); },
     };
 }
@@ -25,6 +26,7 @@ function harness() {
 test('records direct open and first byte with bounded metadata only', () => {
     const h = harness();
     h.observer.openOk();
+    h.observer.clientData(517);
     h.advance(25);
     h.observer.firstByte();
 
@@ -37,10 +39,41 @@ test('records direct open and first byte with bounded metadata only', () => {
     }
 });
 
+test('direct open and empty client data do not arm first-byte timer', () => {
+    const h = harness();
+    h.observer.openOk();
+    h.observer.clientData(0);
+    h.advance(9000);
+    h.fireTimer();
+
+    assert.equal(h.hasTimer(), false);
+    assert.deepEqual(h.events, [
+        { targetKey: 'target-a', event: 'direct_open_ok', elapsedMs: 0 },
+    ]);
+});
+
+test('later nonempty client payload arms timer after zero-payload handshake', () => {
+    const h = harness();
+    h.observer.openOk();
+    h.advance(2500);
+    assert.equal(h.hasTimer(), false);
+
+    h.observer.clientData(128);
+    assert.equal(h.hasTimer(), true);
+    h.advance(8000);
+    h.fireTimer();
+
+    assert.deepEqual(h.events, [
+        { targetKey: 'target-a', event: 'direct_open_ok', elapsedMs: 0 },
+        { targetKey: 'target-a', event: 'direct_first_byte_timeout', elapsedMs: 10500 },
+    ]);
+});
+
 test('records direct open error as terminal event', () => {
     const h = harness();
     h.advance(12);
     h.observer.openError(new Error('ignored detail'));
+    h.observer.clientData(10);
     h.observer.firstByte();
     assert.deepEqual(h.events, [
         { targetKey: 'target-a', event: 'direct_open_error', elapsedMs: 12 },
@@ -50,6 +83,7 @@ test('records direct open error as terminal event', () => {
 test('records close before first byte', () => {
     const h = harness();
     h.observer.openOk();
+    h.observer.clientData(32);
     h.advance(40);
     h.observer.closedBeforeByte();
     assert.deepEqual(h.events, [
@@ -58,14 +92,16 @@ test('records close before first byte', () => {
     ]);
 });
 
-test('records timeout after 8000 ms without invoking route behavior', () => {
+test('records timeout 8000 ms after first nonempty client payload without route behavior', () => {
     const h = harness();
     h.observer.openOk();
+    h.advance(700);
+    h.observer.clientData(64);
     h.advance(8000);
     h.fireTimer();
     h.observer.firstByte();
     assert.deepEqual(h.events, [
         { targetKey: 'target-a', event: 'direct_open_ok', elapsedMs: 0 },
-        { targetKey: 'target-a', event: 'direct_first_byte_timeout', elapsedMs: 8000 },
+        { targetKey: 'target-a', event: 'direct_first_byte_timeout', elapsedMs: 8700 },
     ]);
 });
