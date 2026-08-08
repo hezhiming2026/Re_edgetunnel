@@ -31,6 +31,9 @@ jobs:
           npm test
           npm run check
 
+      - name: Bundle Worker with Wrangler
+        run: npx --yes wrangler@4 deploy --dry-run --config wrangler.toml --outdir /tmp/wrangler-dry-run
+
   deploy:
     name: Deploy edge.tianbufu.click
     if: >-
