@@ -70,6 +70,7 @@ export function createEgressObserver({
     let timer = null;
     let terminal = false;
     let opened = false;
+    let payloadStarted = false;
 
     const emit = (event) => {
         record({
@@ -91,6 +92,10 @@ export function createEgressObserver({
             if (terminal || opened) return;
             opened = true;
             emit('direct_open_ok');
+        },
+        clientData(byteLength) {
+            if (terminal || payloadStarted || !opened || !(byteLength > 0)) return;
+            payloadStarted = true;
             timer = setTimer(() => {
                 if (terminal) return;
                 terminal = true;
