@@ -160,6 +160,31 @@ test('clearing manual ADD override reveals optimizer pool again', () => {
     assert.equal(readAuthoritativeAddTxt(storage), '104.16.1.1:443#optimizer\n');
 });
 
+test('durable cleared ADD state is distinguishable from uninitialized authority', async () => {
+    assert.equal(typeof poolStore.readOptimizerAddState, 'function');
+    const cleared = await poolStore.readOptimizerAddState({
+        OPTIMIZER_COORDINATOR: {
+            getByName() {
+                return {
+                    getAddState: async () => ({ initialized: true, add_txt: null }),
+                };
+            },
+        },
+    });
+    const uninitialized = await poolStore.readOptimizerAddState({
+        OPTIMIZER_COORDINATOR: {
+            getByName() {
+                return {
+                    getAddState: async () => ({ initialized: false, add_txt: null }),
+                };
+            },
+        },
+    });
+
+    assert.deepEqual(cleared, { initialized: true, add_txt: null });
+    assert.deepEqual(uninitialized, { initialized: false, add_txt: null });
+});
+
 test('manual ADD writes use durable authority when binding exists', async () => {
     let written = null;
     let kvWrites = 0;
