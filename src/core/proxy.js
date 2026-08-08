@@ -6,6 +6,11 @@ import { parseProxyAddress } from "../utils/ip.js";
 import { parseConcurrentDialCount, raceSocketCandidates } from "./dialer.js";
 import { isSpeedTestSite, LocalSpeedTestSession } from "./speedtest.js";
 import {
+    createEgressObserver,
+    findDiagnosticTargetKey,
+    recordEgressDiagnosticEvent,
+} from "../ops/egress-diagnostics.js";
+import {
     ShadowsocksAeadDecoder,
     ShadowsocksAeadEncoder,
     tryParseShadowsocksTarget,
@@ -74,11 +79,12 @@ function makeReadableStr(socket, earlyDataHeader) {
     });
 }
 
-export async function connectStreams(remoteSocket, webSocket, headerData, retryFunc) {
+export async function connectStreams(remoteSocket, webSocket, headerData, retryFunc, observer = null) {
     let header = headerData, hasData = false;
     await remoteSocket.readable.pipeTo(
         new WritableStream({
             async write(chunk, controller) {
+                if (!hasData) observer?.firstByte();
                 hasData = true;
                 if (webSocket.readyState !== WebSocket.OPEN) controller.error('ws.readyState is not open');
                 if (header) {
@@ -96,9 +102,11 @@ export async function connectStreams(remoteSocket, webSocket, headerData, retryF
     ).catch((err) => {
         closeSocketQuietly(webSocket);
     });
-    if (!hasData && retryFunc) {
-        await retryFunc();
-    } else if (hasData) {
+    if (!hasData) {
+        observer?.closedBeforeByte();
+        if (retryFunc) await retryFunc();
+    } else {
+        observer?.finish();
         closeSocketQuietly(webSocket);
     }
 }
@@ -172,10 +180,6 @@ export async function forwardDataUDP(udpChunk, webSocket, respHeader, dnsResolve
 }
 
 export async function forwardDataTCP(host, portNum, rawData, ws, respHeader, remoteConnWrapper, yourUUID, proxyConfig) {
-    // proxyConfig contains: proxyIP, enableProxyFallback, socks5 (type, account, global), whiteList
-    // This is passed from the main worker to avoid global state issues.
-
-    // unpack proxyConfig
     let {
         proxyIP,
         enableProxyFallback,
@@ -183,17 +187,13 @@ export async function forwardDataTCP(host, portNum, rawData, ws, respHeader, rem
         socks5Account,
         socks5Global,
         socks5Whitelist,
-        cachedProxyIndexRef, // This is an object { value: 0 } so we can update it
+        cachedProxyIndexRef,
         tcpConcurrentDial,
         proxyConcurrentDial,
         upstreamProxy,
+        diagnosticTargets,
+        egressFirstByteTimeoutMs,
     } = proxyConfig;
-
-    // Note: parsedSocks5Address should be parsed once at request level if possible, 
-    // or we parse it here if needed. Ideally passed in proxyConfig if it's static for the request.
-    // Assuming socks5Account is the string.
-
-    // console.log(`[TCP转发] 目标: ${host}:${portNum} | 反代IP: ${proxyIP} | ...`);
 
     async function connectDirect(address, port, data, proxyList = null, useFallback = true) {
         let remoteSock;
@@ -208,7 +208,6 @@ export async function forwardDataTCP(host, portNum, rawData, ws, respHeader, rem
                         return { hostname, port: candidatePort, index: candidateIndex };
                     });
                 try {
-                    // console.log(`[反代连接] ...`);
                     const winner = await raceSocketCandidates(candidates, (candidate) =>
                         connectWithTimeout({ hostname: candidate.hostname, port: candidate.port })
                     );
@@ -268,7 +267,7 @@ export async function forwardDataTCP(host, portNum, rawData, ws, respHeader, rem
             try { await writer.write(rawData); }
             finally { writer.releaseLock(); }
         } else if (socks5Type === 'socks5') {
-            const parsed = await getSocks5Account(socks5Account); // TODO: handle error or pre-parse
+            const parsed = await getSocks5Account(socks5Account);
             newSocket = await socks5Connect(host, portNum, rawData, parsed);
         } else if (socks5Type === 'http' || socks5Type === 'https') {
             const parsed = await getSocks5Account(socks5Account);
@@ -288,12 +287,20 @@ export async function forwardDataTCP(host, portNum, rawData, ws, respHeader, rem
     if (upstreamProxy || (socks5Type && (socks5Global || checkSocks5Whitelist(host)))) {
         await connectToProxy();
     } else {
+        const targetKey = findDiagnosticTargetKey(host, portNum, diagnosticTargets);
+        const observer = targetKey ? createEgressObserver({
+            targetKey,
+            timeoutMs: egressFirstByteTimeoutMs || 8000,
+            record: recordEgressDiagnosticEvent,
+        }) : null;
         try {
             const initialSocket = await connectDirect(host, portNum, rawData);
+            observer?.openOk();
             remoteConnWrapper.socket = initialSocket;
             initialSocket.closed.catch(() => { }).finally(() => closeSocketQuietly(ws));
-            void connectStreams(initialSocket, ws, respHeader, proxyIP ? connectToProxy : null).catch(() => closeSocketQuietly(ws));
+            void connectStreams(initialSocket, ws, respHeader, proxyIP ? connectToProxy : null, observer).catch(() => closeSocketQuietly(ws));
         } catch (err) {
+            observer?.openError(err);
             if (!proxyIP) {
                 console.warn(`TCP connection failed: ${err.message}`);
                 closeSocketQuietly(ws);
@@ -312,8 +319,6 @@ export async function forwardDataTCP(host, portNum, rawData, ws, respHeader, rem
 export async function handleWSRequest(request, yourUUID, proxyConfig) {
     const wssPair = new WebSocketPair();
     const [clientSock, serverSock] = Object.values(wssPair);
-    // Recent Workers compatibility dates deliver binary frames as Blob by
-    // default. The protocol parsers require ArrayBuffer/Uint8Array input.
     serverSock.binaryType = 'arraybuffer';
     serverSock.accept();
     let remoteConnWrapper = { socket: null };
@@ -478,7 +483,6 @@ export async function handleWSRequest(request, yourUUID, proxyConfig) {
             );
         },
     })).catch((err) => {
-        // console.error('Pipe error', err);
         closeSession();
     });
 
