@@ -8,6 +8,6 @@ This file records the first guarded production deployment request. The associate
 
 ## Security event diagnosis
 
-The first health check reached Cloudflare but received a Managed Challenge from Security Level / Under Attack Mode (`source=securitylevel`, `ruleId=iuam`). The deployment flow applies a hostname-scoped Configuration Rule for `edge.tianbufu.click`, leaving the rest of the zone security controls unchanged.
+The first health check reached Cloudflare but received a Managed Challenge from Security Level / Under Attack Mode (`source=securitylevel`, `ruleId=iuam`). The deployment flow applies hostname-scoped exceptions for `edge.tianbufu.click`, leaving the rest of the zone security controls unchanged.
 
-The API token now has Config Rules Edit. Cloudflare accepted the permission but rejected `security_level=off` as not entitled for the current plan, so the retry uses the documented `essentially_off` value instead.
+The API token has Config Rules Edit. Cloudflare accepted `security_level=essentially_off`, and normal Safari/Chrome access no longer presents a visible challenge, but GitHub's Azure runner is still challenged. The next retry adds a WAF custom Skip rule that bypasses only the `Security Level` product for this hostname, which is the deterministic non-browser fix needed by VLESS/WebSocket clients.
