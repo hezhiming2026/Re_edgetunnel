@@ -6,7 +6,13 @@ import {
     readAuthoritativePoolStatus,
     rollbackAuthoritativePool,
 } from '../../src/ops/pool-authority-core.js';
-import { buildPoolSnapshot, formatAddTxt, parseAllowedCidrs, validatePoolEntries } from '../../src/ops/pool-store.js';
+import {
+    buildPoolSnapshot,
+    formatAddTxt,
+    parseAllowedCidrs,
+    readOptimizerAddTxt,
+    validatePoolEntries,
+} from '../../src/ops/pool-store.js';
 
 class MemorySyncStorage {
     constructor(seed = {}) {
@@ -105,4 +111,25 @@ test('snapshot revision is timestamp plus canonical checksum prefix', async () =
     const snapshot = await buildPoolSnapshot(entries, new Date('2026-08-08T12:34:56.789Z'));
     assert.match(snapshot.revision, /^20260808T123456789Z-[0-9a-f]{12}$/);
     assert.match(snapshot.checksum, /^[0-9a-f]{64}$/);
+});
+
+test('legacy fallback is allowed only when durable binding is absent or uninitialized', async () => {
+    assert.equal(await readOptimizerAddTxt({}), null);
+    assert.equal(await readOptimizerAddTxt({
+        OPTIMIZER_COORDINATOR: {
+            getByName() {
+                return { getAddTxt: async () => null };
+            },
+        },
+    }), null);
+});
+
+test('durable authority RPC errors fail closed instead of silently falling back', async () => {
+    await assert.rejects(() => readOptimizerAddTxt({
+        OPTIMIZER_COORDINATOR: {
+            getByName() {
+                return { getAddTxt: async () => { throw new Error('authority unavailable'); } };
+            },
+        },
+    }), /authority unavailable/);
 });
