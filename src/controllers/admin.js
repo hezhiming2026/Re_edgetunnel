@@ -3,6 +3,7 @@ import { readConfig, logRequest } from "../config.js";
 import { getCloudflareUsage, requestOptimalAPI, generateRandomIP } from "../utils/ip.js";
 import { getSocks5Account, isSafeConnectTarget } from "../utils/helpers.js";
 import { socks5Connect, httpConnect } from "../protocols/socks5.js";
+import { readOptimizerAddTxt, writeManualAddTxt } from "../ops/pool-store.js";
 import { isTrustedRequestOrigin } from "./auth.js";
 import { adminPage } from '../utils/pages.js';
 
@@ -144,7 +145,7 @@ export async function handleAdmin(request, env, config, path) {
         } else if (path === 'admin/add.txt') {
             try {
                 const txt = await request.text();
-                await env.KV.put('ADD.txt', txt);
+                await writeManualAddTxt(env, txt);
                 return new Response(JSON.stringify({ success: true }), { status: 200 });
             } catch (err) {
                 return new Response(JSON.stringify({ error: err.message }), { status: 500 });
@@ -153,7 +154,8 @@ export async function handleAdmin(request, env, config, path) {
     } else if (path === 'admin/config.json') {
         return new Response(JSON.stringify(config, null, 2), { status: 200, headers: { 'Content-Type': 'application/json' } });
     } else if (path === 'admin/add.txt') {
-        let localIPs = await env.KV.get('ADD.txt') || 'null';
+        let localIPs = await readOptimizerAddTxt(env);
+        if (!localIPs) localIPs = await env.KV.get('ADD.txt') || 'null';
         if (localIPs == 'null') {
             const [ips, str] = await generateRandomIP(request, config.优选订阅生成.本地IP库.随机数量, config.优选订阅生成.本地IP库.指定端口);
             localIPs = str;
