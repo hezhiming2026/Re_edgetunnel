@@ -92,6 +92,21 @@ export function getOptimizerCoordinator(env) {
     return namespace.getByName('optimizer-pool-v1');
 }
 
+export async function readOptimizerAddState(env) {
+    const namespace = env?.OPTIMIZER_COORDINATOR;
+    if (!namespace || typeof namespace.getByName !== 'function') {
+        return { initialized: false, add_txt: null };
+    }
+    const state = await namespace.getByName('optimizer-pool-v1').getAddState();
+    if (!state || typeof state !== 'object' || Array.isArray(state)) {
+        throw new PoolStoreError('Optimizer ADD state is unavailable', 503);
+    }
+    return {
+        initialized: state.initialized === true,
+        add_txt: typeof state.add_txt === 'string' && state.add_txt.trim() ? state.add_txt : null,
+    };
+}
+
 export async function readOptimizerAddTxt(env) {
     const namespace = env?.OPTIMIZER_COORDINATOR;
     if (!namespace || typeof namespace.getByName !== 'function') return null;
