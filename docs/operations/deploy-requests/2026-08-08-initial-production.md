@@ -10,4 +10,6 @@ This file records the first guarded production deployment request. The associate
 
 The first health check reached Cloudflare but received a Managed Challenge from Security Level / Under Attack Mode (`source=securitylevel`, `ruleId=iuam`). The deployment flow applies hostname-scoped exceptions for `edge.tianbufu.click`, leaving the rest of the zone security controls unchanged.
 
-The API token has Config Rules Edit. Cloudflare accepted `security_level=essentially_off`, and normal Safari/Chrome access no longer presents a visible challenge, but GitHub's Azure runner is still challenged. The final retry adds a WAF custom Skip rule that bypasses only the `Security Level` product for this hostname. The automation also preserves the immutable Cloudflare rule reference ID when updating the existing configuration rule.
+Cloudflare accepted the hostname-scoped `security_level=essentially_off` Configuration Rule and the WAF custom Skip rule for the `Security Level` product. A no-cookie curl from the actual client network returned HTTP/2 200 with no `cf-mitigated` challenge header, confirming the production client path is reachable.
+
+GitHub-hosted Azure runners can still be challenged because cloud-provider IP reputation is not representative of the client network. The external CI probe is therefore advisory; Worker/KV/secret/security-rule deployment remains the hard production gate.
