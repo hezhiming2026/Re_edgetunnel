@@ -73,105 +73,31 @@ function compactUtcTimestamp(date = new Date()) {
     return date.toISOString().replace(/[-:.]/g, '');
 }
 
-async function readJson(kv, key) {
-    const value = await kv.get(key);
-    if (!value) return null;
-    try {
-        return JSON.parse(value);
-    } catch {
-        throw new PoolStoreError(`Invalid JSON stored at ${key}`, 500);
-    }
-}
-
-function requireKv(env) {
-    if (!env?.KV || typeof env.KV.get !== 'function' || typeof env.KV.put !== 'function') {
-        throw new PoolStoreError('KV binding is required', 503);
-    }
-    return env.KV;
-}
-
-function assertExpectedRevision(requestBody, current) {
-    if (!requestBody || typeof requestBody !== 'object' || !Object.hasOwn(requestBody, 'expected_current_revision')) {
-        throw new PoolStoreError('expected_current_revision is required', 400);
-    }
-    const expected = requestBody.expected_current_revision;
-    if (expected !== null && typeof expected !== 'string') {
-        throw new PoolStoreError('expected_current_revision must be a string or null', 400);
-    }
-    if ((current ?? null) !== expected) {
-        throw new PoolStoreError('Current optimizer revision changed', 409);
-    }
-}
-
-export async function publishPool(env, requestBody, allowedCidrs) {
-    const kv = requireKv(env);
-    const current = await kv.get('optimizer:current');
-    assertExpectedRevision(requestBody, current);
-
-    let entries;
-    try {
-        entries = validatePoolEntries(requestBody.entries, allowedCidrs);
-    } catch (error) {
-        throw new PoolStoreError(error.message, 400);
-    }
-
+export async function buildPoolSnapshot(entries, date = new Date()) {
     const canonical = canonicalPoolJson(entries);
     const checksum = await sha256Hex(canonical);
-    const revision = `${compactUtcTimestamp()}-${checksum.slice(0, 12)}`;
-    const createdAt = new Date().toISOString();
-    const snapshot = { revision, checksum, created_at: createdAt, entries };
-
-    await kv.put(`optimizer:pool:${revision}`, JSON.stringify(snapshot));
-    if (current) await kv.put('optimizer:previous', current);
-    await kv.put('optimizer:current', revision);
-    await kv.put('ADD.txt', formatAddTxt(entries));
-    await kv.put('optimizer:status', JSON.stringify({
-        mutation: 'publish',
-        at: createdAt,
-        revision,
-        previous: current || null,
+    return {
+        revision: `${compactUtcTimestamp(date)}-${checksum.slice(0, 12)}`,
         checksum,
-    }));
-
-    return { revision, checksum, previous: current || null };
+        created_at: date.toISOString(),
+        entries,
+    };
 }
 
-export async function rollbackPool(env, expectedCurrentRevision) {
-    const kv = requireKv(env);
-    const current = await kv.get('optimizer:current');
-    if (typeof expectedCurrentRevision !== 'string' || !expectedCurrentRevision) {
-        throw new PoolStoreError('expected_current_revision is required', 400);
+export function getOptimizerCoordinator(env) {
+    const namespace = env?.OPTIMIZER_COORDINATOR;
+    if (!namespace || typeof namespace.getByName !== 'function') {
+        throw new PoolStoreError('Optimizer coordinator binding is required', 503);
     }
-    if (current !== expectedCurrentRevision) throw new PoolStoreError('Current optimizer revision changed', 409);
-
-    const previous = await kv.get('optimizer:previous');
-    if (!previous) throw new PoolStoreError('No previous optimizer revision is available', 409);
-    const snapshot = await readJson(kv, `optimizer:pool:${previous}`);
-    if (!snapshot || !Array.isArray(snapshot.entries) || typeof snapshot.checksum !== 'string') {
-        throw new PoolStoreError('Previous optimizer snapshot is unavailable', 500);
-    }
-
-    const at = new Date().toISOString();
-    await kv.put('optimizer:previous', current);
-    await kv.put('optimizer:current', previous);
-    await kv.put('ADD.txt', formatAddTxt(snapshot.entries));
-    await kv.put('optimizer:status', JSON.stringify({
-        mutation: 'rollback',
-        at,
-        revision: previous,
-        previous: current,
-        checksum: snapshot.checksum,
-    }));
-
-    return { revision: previous, checksum: snapshot.checksum };
+    return namespace.getByName('optimizer-pool-v1');
 }
 
-export async function readPoolStatus(env) {
-    const kv = requireKv(env);
-    const [current, previous, status] = await Promise.all([
-        kv.get('optimizer:current'),
-        kv.get('optimizer:previous'),
-        readJson(kv, 'optimizer:status'),
-    ]);
-    return { current: current || null, previous: previous || null, status };
+export async function readOptimizerAddTxt(env) {
+    try {
+        const stub = getOptimizerCoordinator(env);
+        const value = await stub.getAddTxt();
+        return typeof value === 'string' && value.trim() ? value : null;
+    } catch {
+        return null;
+    }
 }
