@@ -2,6 +2,7 @@ import { DurableObject } from 'cloudflare:workers';
 import {
     publishAuthoritativePool,
     rollbackAuthoritativePool,
+    readAuthoritativeAddState,
     readAuthoritativeAddTxt,
     readAuthoritativePoolStatus,
     setManualAuthoritativeAddTxt,
@@ -48,7 +49,8 @@ export class OptimizerCoordinator extends DurableObject {
     async publishPool(request) {
         let legacyManualAddTxt = null;
         const status = readAuthoritativePoolStatus(this.ctx.storage);
-        if (!status.current && this.env?.KV) {
+        const addState = readAuthoritativeAddState(this.ctx.storage);
+        if (!status.current && !addState.initialized && this.env?.KV) {
             legacyManualAddTxt = await this.env.KV.get('ADD.txt');
         }
         const result = publishAuthoritativePool(this.ctx.storage, request, legacyManualAddTxt);
@@ -84,6 +86,10 @@ export class OptimizerCoordinator extends DurableObject {
 
     getStatus() {
         return readAuthoritativePoolStatus(this.ctx.storage);
+    }
+
+    getAddState() {
+        return readAuthoritativeAddState(this.ctx.storage);
     }
 
     getAddTxt() {
