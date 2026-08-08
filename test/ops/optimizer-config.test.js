@@ -18,3 +18,10 @@ test('browser ADD mutations route through durable coordinator instead of KV', as
     assert.match(coordinatorSource, /setManualAddTxt\s*\(value\)/);
     assert.match(coordinatorSource, /setManualAuthoritativeAddTxt\(this\.ctx\.storage,\s*value\)/);
 });
+
+test('first optimizer publish migrates pre-DO ADD.txt through the durable authority', async () => {
+    const coordinatorSource = await readFile(new URL('../../src/ops/optimizer-coordinator.js', import.meta.url), 'utf8');
+
+    assert.match(coordinatorSource, /await\s+this\.env\.KV\.get\(['"]ADD\.txt['"]\)/);
+    assert.match(coordinatorSource, /publishAuthoritativePool\(this\.ctx\.storage,\s*request,\s*legacyManualAddTxt\)/);
+});
