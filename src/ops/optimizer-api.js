@@ -7,6 +7,15 @@ import {
 } from './pool-store.js';
 
 const MAX_JSON_BODY_BYTES = 16 * 1024;
+const PROBE_PAYLOAD_BYTES = 64 * 1024;
+const PROBE_PATTERN = new TextEncoder().encode('re-edgetunnel-optimizer-probe-v1\n');
+const PROBE_PAYLOAD = (() => {
+    const payload = new Uint8Array(PROBE_PAYLOAD_BYTES);
+    for (let offset = 0; offset < payload.length; offset += PROBE_PATTERN.length) {
+        payload.set(PROBE_PATTERN.subarray(0, Math.min(PROBE_PATTERN.length, payload.length - offset)), offset);
+    }
+    return payload;
+})();
 
 function jsonResponse(body, status = 200) {
     return new Response(JSON.stringify(body), {
@@ -14,6 +23,18 @@ function jsonResponse(body, status = 200) {
         headers: {
             'Content-Type': 'application/json;charset=utf-8',
             'Cache-Control': 'no-store',
+        },
+    });
+}
+
+export function buildOptimizerProbeResponse() {
+    return new Response(PROBE_PAYLOAD.slice(), {
+        status: 200,
+        headers: {
+            'Content-Type': 'application/octet-stream',
+            'Content-Length': String(PROBE_PAYLOAD_BYTES),
+            'Cache-Control': 'no-store',
+            'X-Optimizer-Probe-Version': '1',
         },
     });
 }
@@ -44,6 +65,11 @@ function allowedCidrsFromEnv(env) {
 
 export async function handleOptimizerRequest(request, env, pathLower) {
     try {
+        if (pathLower === 'ops/optimizer/v1/probe') {
+            if (request.method !== 'GET') return jsonResponse({ error: 'Method Not Allowed' }, 405);
+            return buildOptimizerProbeResponse();
+        }
+
         if (pathLower === 'ops/optimizer/v1/status') {
             if (request.method !== 'GET') return jsonResponse({ error: 'Method Not Allowed' }, 405);
             return jsonResponse(await readPoolStatus(env));
