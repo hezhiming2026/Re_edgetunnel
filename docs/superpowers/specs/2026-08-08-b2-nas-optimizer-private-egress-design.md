@@ -8,25 +8,25 @@ Status: approved design, implementation not started
 Extend the production `edge.tianbufu.click` deployment with two independent capabilities:
 
 1. A NAS-hosted Cloudflare ingress optimizer that continuously curates the `ADD.txt` pool from the real client-side network.
-2. A selective private NAS egress path for destination domains where the Worker's normal direct TCP path fails or produces no upstream data.
+2. A selective private NAS egress path for destination domains where the Worker's normal direct TCP path fails, closes without response data, or reaches a first-byte timeout.
 
-The two capabilities are deliberately decoupled. Ingress optimization must never be treated as a fix for Worker-to-destination failures, and the NAS egress path must not become the default route for traffic that already works directly.
+The two capabilities are intentionally decoupled. Ingress optimization must never be treated as a fix for Worker-to-destination failures, and NAS egress must not become the default route for traffic that already works directly.
 
-Current observed baseline:
+Observed baseline before B2:
 
 - Google works through the imported subscription.
 - Instagram works through the imported subscription.
 - X/Twitter and JavDB remain in a continuous loading state without a useful client-side error.
 
-That symptom is evidence of a destination-specific path problem, but it is not yet a proven root cause. Implementation must add diagnostics before claiming that Cloudflare direct egress is the cause.
+This is evidence of a destination-specific path problem, not proof of one specific root cause. B2 must add observation-first diagnostics before enabling production fallback domains.
 
-## 2. Existing repository behavior to preserve
+## 2. Existing behavior to preserve
 
-The current subscription path already treats KV `ADD.txt` as the operator-controlled ingress address pool. When `ADD.txt` contains entries, subscription generation expands those entries into VLESS/Trojan nodes using `edge.tianbufu.click` as Host/SNI. If the file is empty, the Worker falls back to generated Cloudflare addresses.
+The current subscription path already treats KV `ADD.txt` as the operator-controlled ingress pool. When entries exist, subscription generation expands them into VLESS/Trojan nodes using `edge.tianbufu.click` as Host/SNI. If the file is empty, the Worker falls back to generated Cloudflare addresses.
 
-The current Worker also already has outbound abstractions for direct TCP and optional SOCKS5/HTTP-style upstream proxies. B2 should reuse and refactor these primitives rather than introduce an unrelated proxy stack.
+The current forwarding core already supports direct TCP plus optional SOCKS5/HTTP-style upstream proxies. B2 must reuse/refactor those primitives instead of introducing a second unrelated forwarding stack.
 
-The production deployment remains:
+Production resources remain:
 
 - Worker: `tianbufu-edge`
 - Custom Domain: `edge.tianbufu.click`
@@ -40,13 +40,12 @@ The production deployment remains:
                             NAS
                  +-----------------------+
                  | ingress optimizer     |
-                 |                       |
                  | sample -> probe       |
                  | score -> hysteresis   |
                  | publish -> verify     |
                  +-----------+-----------+
                              |
-                             | authenticated machine API
+                             | machine API
                              v
                         Worker KV
                          ADD.txt
@@ -59,11 +58,11 @@ Client -> selected Cloudflare ingress -> edge.tianbufu.click
                                       |
                       +---------------+----------------+
                       |                                |
-                normal destination              fallback-eligible
+                direct-only target              fallback-eligible
                       |                                |
                    direct                         direct first
                       |                                |
-                      v                         error / early close /
+                      v                         open error / close /
               Google / Instagram               first-byte timeout
                                                        |
                                                        v
@@ -78,103 +77,110 @@ Client -> selected Cloudflare ingress -> edge.tianbufu.click
                                                target destination
 ```
 
-The NAS must not expose a SOCKS5 or HTTP CONNECT listener on the public Internet.
+The NAS must not expose SOCKS5 or HTTP CONNECT on a public or NAS-host interface.
 
-## 4. Subsystem A: NAS ingress optimizer
+## 4. Subsystem A — NAS ingress optimizer
 
-### 4.1 Scope
+### 4.1 V1 scope
 
-Version 1 optimizes only Cloudflare IPv4 ingress candidates on TCP 443 for `edge.tianbufu.click`.
+V1 optimizes only Cloudflare IPv4 ingress candidates on TCP 443 for `edge.tianbufu.click`.
 
-IPv6, alternate Cloudflare TLS ports, multi-ISP profiles, and public third-party "preferred IP" feeds are explicitly outside the first implementation. They can be added later without changing the publisher contract.
+Out of scope for v1:
+
+- IPv6.
+- Alternate Cloudflare TLS ports.
+- Multiple ISP/mobile profiles in one optimizer instance.
+- Automatic third-party preferred-IP feeds.
 
 ### 4.2 Candidate sources
 
-Each optimization cycle builds a candidate set from three sources:
+Every cycle combines:
 
-1. Every address in the current production Top-N pool.
-2. Operator-owned seed addresses from a local configuration file.
-3. Randomly sampled addresses from Cloudflare's official IPv4 ranges.
+1. All current production Top-N addresses.
+2. Operator-owned local seed addresses.
+3. Random samples from Cloudflare official IPv4 ranges.
 
-Third-party address feeds are not trusted as an automatic source.
+The optimizer keeps a cached last-known-good official CIDR set and must not replace it with an empty/invalid remote fetch. The Worker publisher uses a repository-controlled allowed-CIDR list for independent server-side validation.
 
-The default cycle sizes are:
+Default cycle sizes:
 
-- Fast cycle every 6 hours: approximately 64 candidates.
-- Full cycle once per day: approximately 192 candidates.
+- Fast cycle every 6 hours: about 64 candidates.
+- Full cycle daily: about 192 candidates.
 
-Current winners are always re-tested so a newly sampled pool cannot replace them merely because they were omitted from sampling.
+Current winners are always re-tested in the same cycle used for promotion decisions.
 
 ### 4.3 Probe semantics
 
-A probe must measure the route that the subscription will actually use. It therefore connects to the candidate IP while using:
+The optimizer measures the path the subscription actually uses:
 
-- TLS SNI: `edge.tianbufu.click`
-- HTTP Host: `edge.tianbufu.click`
-- Port: `443`
+- TCP destination: candidate IPv4.
+- Port: 443.
+- TLS SNI: `edge.tianbufu.click`.
+- HTTP Host: `edge.tianbufu.click`.
 
-The optimizer must not benchmark a candidate by requesting the IP as an IP-literal HTTPS origin.
+It must not benchmark an IP-literal HTTPS origin.
 
-Each candidate receives three short probe rounds. At minimum the probe records:
+Each candidate receives three short rounds recording at least:
 
-- TCP connect success and connect duration.
-- TLS handshake success and application-connect duration.
-- HTTP status from an authenticated, bounded optimizer probe endpoint.
+- TCP connect success/duration.
+- TLS handshake success/application-connect duration.
+- Worker probe HTTP status.
 - Time to first byte.
-- Total request duration.
-- Response bytes for a small bounded payload, allowing a low-cost throughput estimate.
+- Total duration.
+- Bytes received from a small deterministic payload.
 
-A certificate validation failure is a hard failure.
+Certificate validation failure is a hard failure.
 
-The Worker optimizer probe endpoint must cap the response payload to 64 KiB. It exists only to measure the ingress path and must not proxy or fetch arbitrary URLs.
+`GET /ops/optimizer/v1/probe` is authenticated and returns a fixed 64 KiB deterministic payload plus minimal metadata. It never fetches caller-supplied URLs and does not proxy arbitrary content.
 
-### 4.4 Eligibility and scoring
+### 4.4 Eligibility and score
 
-A candidate is eligible only if:
+A candidate is eligible only when:
 
 - At least 2 of 3 rounds succeed.
-- TLS certificate verification succeeds.
-- The HTTP probe reaches the Worker successfully.
-- Median time to first byte is below a configurable hard ceiling, default 1500 ms.
+- TLS certificate validation succeeds.
+- The Worker probe endpoint is reached successfully.
+- Median TTFB is <= 1500 ms by default.
 
-Eligible candidates receive a relative composite score across the current cycle:
+Composite score within the current cycle:
 
-- 45% reliability / success rate.
-- 25% median time to first byte.
-- 15% tail stability using p95 total duration.
-- 15% bounded throughput estimate.
+- 45% success rate/reliability.
+- 25% median TTFB percentile.
+- 15% p95 total-duration percentile.
+- 15% bounded-throughput percentile.
 
-Lower latency and tail duration are converted to higher percentile scores before weighting. Exact raw millisecond scales therefore do not dominate the score across different access networks.
-
-Tie-breaking favors addresses already present in the current production pool.
+Latency/duration use inverse percentile rank so lower values score higher. Ties favor an address already in the current pool.
 
 ### 4.5 Top-N and diversity
 
 Default production pool size: 8.
 
-Selection constraints:
+Machine-published pools must satisfy:
 
-- Maximum 2 addresses from the same IPv4 `/24`.
-- All published optimizer-managed entries use port 443.
+- IPv4 only.
+- Cloudflare allowed CIDR membership.
+- Port 443 only.
 - No duplicate IPs.
-- Published labels include rank and a short profile label, but never credentials.
+- Maximum 2 addresses per IPv4 `/24`.
+- Maximum 16 submitted entries.
+- Bounded labels without control characters.
 
-The machine publisher rejects pools that violate these constraints.
+### 4.6 Promotion and hysteresis
 
-### 4.6 Hysteresis
+A new pool is publishable only if it contains at least 4 eligible candidates.
 
-A new pool does not replace the production pool merely because its score is slightly better.
+The current Top-8 is defined as **unhealthy** when fewer than 4 of its entries remain eligible during the same comparison cycle.
 
-Promotion occurs only when all safety gates pass and either:
+Promotion occurs only when all validation gates pass and either:
 
-- The current pool is unhealthy, or
-- The new pool's median composite score improves by at least 15% over the current pool.
+- the current pool is unhealthy, or
+- the proposed pool's median composite score is at least 15% better than the current pool's median score.
 
-If fewer than 4 eligible candidates remain, the optimizer must not publish a new pool. It retains the last known good pool and emits a failed-cycle result.
+If the safety gates fail, the optimizer records a failed/no-promotion cycle and leaves production `ADD.txt` untouched.
 
-### 4.7 State on NAS
+### 4.7 NAS state
 
-The optimizer persists state under a configurable data directory, default `/data` inside the container:
+Default persistent state:
 
 ```text
 /data/
@@ -186,63 +192,54 @@ The optimizer persists state under a configurable data directory, default `/data
   runs/<run-id>.json
 ```
 
-`history.jsonl` stores cycle summaries, not secrets. Individual run files may contain candidate metrics and are bounded by retention policy.
-
 Default retention:
 
-- Detailed runs: 30 days.
+- Detailed run files: 30 days.
 - Cycle summaries: 180 days.
+
+Secrets are never written into run/history files.
 
 ## 5. Optimizer machine API
 
-### 5.1 Authentication
+### 5.1 Authentication boundary
 
-The NAS does not receive the Cloudflare deployment API token.
+The NAS optimizer does not receive the Cloudflare deployment API token.
 
-A new Worker secret named `OPTIMIZER_TOKEN` authenticates a narrowly scoped machine API using:
+A new Worker secret `OPTIMIZER_TOKEN` authenticates only `/ops/optimizer/*` and `/ops/egress/*` machine endpoints:
 
 ```text
 Authorization: Bearer <OPTIMIZER_TOKEN>
 ```
 
-Token comparison must avoid obvious timing leaks. The token is independent of `ADMIN` and `UUID` and grants no browser-admin privileges.
+Comparison must be timing-resistant. The token is independent from `ADMIN` and `UUID` and cannot authorize browser-admin routes.
 
 ### 5.2 Endpoints
-
-Versioned endpoints:
 
 ```text
 GET  /ops/optimizer/v1/probe
 PUT  /ops/optimizer/v1/pool
 POST /ops/optimizer/v1/rollback
 GET  /ops/optimizer/v1/status
+POST /ops/egress/v1/diagnose
 ```
 
-`probe` returns only a bounded deterministic payload and basic probe metadata. It never fetches a caller-supplied destination.
+`pool` accepts structured JSON, not arbitrary raw `ADD.txt`.
 
-`pool` accepts structured JSON rather than raw arbitrary `ADD.txt` text. The server validates every entry before deriving and writing `ADD.txt`.
+### 5.3 Optimistic concurrency
 
-### 5.3 Publisher validation
+Every publish request includes:
 
-The machine API accepts at most 16 entries and enforces the v1 optimizer policy:
+```text
+expected_current_revision
+```
 
-- IPv4 only.
-- Address must belong to the configured official Cloudflare IPv4 ranges.
-- Port must equal 443.
-- No duplicate IP.
-- Maximum 2 entries per `/24`.
-- Entry labels have bounded length and control characters are rejected.
-- Request body has a small fixed maximum size.
+If it does not match Worker KV `optimizer:current`, the Worker returns HTTP 409 and performs no mutation. Rollback also requires the caller's expected current revision.
 
-These constraints ensure that compromise of `OPTIMIZER_TOKEN` cannot silently turn subscription addresses into arbitrary third-party ingress hosts.
+This prevents overlapping NAS jobs or stale retry requests from overwriting a newer pool.
 
-The existing authenticated browser-admin `ADD.txt` workflow remains available for deliberate manual overrides and is not constrained to the optimizer's v1 policy.
+### 5.4 KV version model
 
-### 5.4 Versioning and rollback
-
-A publish operation stores a versioned pool snapshot before changing production `ADD.txt`.
-
-Logical KV records:
+Logical keys:
 
 ```text
 optimizer:pool:<revision>
@@ -252,40 +249,41 @@ optimizer:status
 ADD.txt
 ```
 
-`optimizer:current` and `optimizer:previous` contain revision identifiers. `ADD.txt` remains the compatibility materialization consumed by the existing subscription code.
-
 Publish order:
 
-1. Validate request.
-2. Store immutable revision snapshot.
-3. Move current revision to previous.
-4. Set current revision.
-5. Materialize validated entries to `ADD.txt`.
-6. Return revision and checksum.
+1. Authenticate and validate the entire request.
+2. Verify `expected_current_revision`.
+3. Write an immutable version snapshot.
+4. Move prior current revision to `optimizer:previous`.
+5. Set `optimizer:current`.
+6. Materialize the validated pool to compatibility key `ADD.txt`.
+7. Return revision and checksum.
 
-The NAS then verifies the subscription path. If post-publish verification fails, it calls the rollback endpoint, which rematerializes the previous known-good revision.
+The NAS then verifies subscription materialization. On post-publish failure it invokes rollback, which rematerializes the previous known-good snapshot.
 
-## 6. Subsystem B: selective private NAS egress
+The existing browser-admin `ADD.txt` editor remains available as an explicit manual override and is not constrained to the optimizer's v1 automatic policy.
+
+## 6. Subsystem B — selective private NAS egress
 
 ### 6.1 Workers VPC transport
 
-B2 uses a Workers VPC Network binding associated with a dedicated Cloudflare Tunnel that terminates on the NAS egress Docker network.
+B2 uses a Workers VPC Network binding associated with a dedicated Cloudflare Tunnel terminating on the NAS egress Docker network.
 
-Workers VPC is currently beta. The implementation must therefore isolate the VPC-specific dialer behind an interface so a future Cloudflare API change or a deliberate migration to a conventional upstream proxy does not require rewriting the forwarding core.
+Workers VPC is beta. VPC-specific connection logic must therefore live behind a dialer interface so a future Cloudflare API change, or migration to a conventional private upstream proxy, does not require rewriting the forwarding core.
 
-The VPC Network `connect()` path is used only to reach the private NAS SOCKS5 service. Target-site TLS remains end-to-end between the tunnel protocol client and the destination through the SOCKS5 connection; the VPC path is not used as a TLS terminator.
+The VPC Network `connect()` path reaches only the private NAS SOCKS5 listener. It is plaintext TCP to the private service; the end destination's TLS/application bytes continue through the SOCKS5 tunnel unchanged.
 
 Operational prerequisites:
 
 - Dedicated Cloudflare Tunnel for NAS egress.
-- `cloudflared` 2025.7.0 or newer.
-- QUIC transport enabled (`auto` or `quic`).
-- Outbound UDP/7844 permitted from the NAS where required.
-- Required Cloudflare Connectivity Directory permissions for creating/binding the VPC Network.
+- `cloudflared` >= 2025.7.0.
+- Tunnel transport `auto` or `quic`.
+- Outbound UDP/7844 allowed where required.
+- Required Cloudflare Connectivity Directory permissions for VPC creation/binding.
 
 ### 6.2 NAS Docker isolation
 
-The NAS deployment contains at least:
+NAS stack:
 
 ```text
 cloudflared
@@ -293,13 +291,15 @@ nas-egress
 edge-optimizer
 ```
 
-`nas-egress` exposes its SOCKS5 listener only on an internal Docker network. The compose file must not publish that port on the NAS host.
+`nas-egress` listens only on an internal Docker network. Docker Compose must not publish its proxy port to the NAS host.
 
-A dedicated Tunnel is preferred over reusing an unrelated NAS Tunnel so the VPC binding's reachable private surface remains narrow and auditable.
+The egress proxy implementation/image must be repository-owned or pinned by immutable image digest; `latest` tags are not acceptable for production.
+
+A dedicated Cloudflare Tunnel is used instead of an unrelated general NAS Tunnel to keep the reachable private surface narrow.
 
 ### 6.3 Dialer abstraction
 
-Outbound connection code is refactored around a small dialer contract:
+Forwarding code uses:
 
 ```text
 dial(targetHost, targetPort) -> socket
@@ -307,95 +307,96 @@ dial(targetHost, targetPort) -> socket
 
 Implementations:
 
-- `directDialer`: current `cloudflare:sockets connect()` behavior.
-- `nasEgressDialer`: VPC-connect to the private NAS SOCKS5 listener, complete the SOCKS5 handshake, then return a socket connected to the requested destination.
+- `directDialer`: existing `cloudflare:sockets connect()` path.
+- `nasEgressDialer`: VPC-connect to the private NAS SOCKS5 service, perform the SOCKS5 handshake for `targetHost:targetPort`, then return the resulting socket.
 
-Existing SOCKS5 protocol logic should be reused where practical by injecting the underlying socket/dial function instead of duplicating the handshake implementation.
+Existing SOCKS5 protocol code should be reused by injecting the underlying socket/dial function instead of duplicating handshake logic.
 
-### 6.4 Domain policy
+### 6.4 Domain routing policy
 
-Default policy is `direct`.
+Default policy is direct.
 
-Two explicit suffix-based lists are supported:
+Two explicit suffix lists are supported:
 
-- `fallback_domains`: try direct first, then NAS egress on a defined failure condition.
-- `force_egress_domains`: skip direct and use NAS egress immediately.
+- `fallback_domains`: direct first, then NAS on a defined pre-response failure.
+- `force_egress_domains`: NAS immediately; failure is closed and does not silently fall back to direct.
 
-Rules are domain suffix matches with label-boundary semantics. For example, a rule for `x.com` matches `x.com` and `api.x.com`, but not `notx.com`.
+Suffix matching is label-boundary aware: `x.com` matches `x.com` and `api.x.com`, not `notx.com`.
 
-IP-literal destinations do not match domain fallback rules in v1.
+V1 does not match IP literals and does not support a global `*` wildcard. B2 must not accidentally become a global NAS relay.
 
-A global wildcard is not supported in v1. B2 must not accidentally become an all-traffic NAS relay.
+X/Twitter and JavDB are initial diagnostic candidates, not hard-coded fallback assumptions in the forwarding library.
 
-Initial production policy is created only after diagnostics. X/Twitter and JavDB are diagnostic candidates, not hard-coded assumptions in the forwarding library.
+### 6.5 Fallback state machine
 
-### 6.5 Fallback conditions
+For `fallback_domains`, NAS fallback is allowed only before any upstream response bytes have been forwarded to the client.
 
-For a `fallback_domains` target, NAS egress is attempted when the direct path has one of these conditions:
+Fallback triggers:
 
-1. TCP open throws or times out.
-2. Direct socket closes before any upstream response data arrives.
-3. No first upstream byte is observed within 8 seconds after the initial client payload is written.
+1. Direct TCP open throws or times out.
+2. Direct socket closes before any response byte.
+3. No first upstream byte arrives within 8 seconds after the initial client payload is written.
 
-The first-byte timeout is intentionally much shorter than the existing session idle timeout so a broken direct path does not present as an indefinite page spinner.
+After the first upstream response byte has been forwarded, route migration is forbidden for that stream.
 
-Once upstream response bytes have been forwarded to the client, the implementation must not silently switch the same stream to NAS egress. Mid-stream route changes can corrupt application protocols and are outside v1.
+If NAS is unavailable:
 
-### 6.6 Failure behavior
+- direct-only traffic is unaffected;
+- fallback traffic fails only after direct and NAS both fail;
+- force-egress traffic fails closed.
 
-If NAS egress is unavailable:
+NAS downtime must not break Google/Instagram or other direct-only destinations.
 
-- Normal/direct-only destinations are unaffected.
-- Fallback destinations retain their direct attempt and fail normally if both paths fail.
-- Force-egress destinations fail closed; they must not unexpectedly fall back to direct.
+## 7. Egress diagnostics and root-cause evidence
 
-The NAS being offline must therefore not break Google/Instagram or other direct-only traffic.
+### 7.1 Synthetic path diagnostic
 
-## 7. Egress diagnostics
+`POST /ops/egress/v1/diagnose` accepts only a configured **target key**, never an arbitrary hostname/port/URL.
 
-### 7.1 Purpose
-
-Diagnostics exist to establish root cause before adding domains to production fallback policy.
-
-An authenticated endpoint compares the direct and NAS egress paths for a fixed allowlist of diagnostic targets.
-
-Conceptual endpoint:
+Example configuration:
 
 ```text
-POST /ops/egress/v1/diagnose
+google -> google.com:443
+x      -> x.com:443
+javdb  -> <operator-approved-current-hostname>:443
 ```
 
-The request selects a named target key, not an arbitrary hostname or port.
+The endpoint compares bounded connection-level metadata:
 
-Configuration example:
+- direct TCP open success/error/time;
+- NAS SOCKS5 open success/error/time;
+- selected conclusion: direct healthy, NAS path available, or unresolved.
+
+It is not a generic HTTP fetcher or port scanner.
+
+### 7.2 Real proxy observation mode
+
+Because a TCP-open diagnostic cannot prove an application first-byte stall, Stage A also adds observation-only events for configured diagnostic domain keys during real proxy sessions.
+
+Allowed event types are bounded, for example:
 
 ```text
-google = google.com:443
-x = x.com:443
-javdb = <operator-approved-current-hostname>:443
+direct_open_ok
+direct_open_error
+direct_closed_before_byte
+direct_first_byte_ok
+direct_first_byte_timeout
+nas_open_ok
+nas_open_error
 ```
 
-### 7.2 Output
+Before production fallback is enabled, diagnostic domains still use direct-only forwarding; the Worker records only the named target key, event type, and elapsed timing. It does not record payloads, full URLs, arbitrary browsing destinations, or unconfigured domain names.
 
-Diagnostic output includes only connection metadata such as:
+Root-cause evidence for X/JavDB requires both:
 
-- target key and configured hostname/port.
-- direct connect success/error and elapsed time.
-- direct first-byte result when a safe deterministic request exists.
-- NAS egress connect success/error and elapsed time.
-- selected recommended policy: direct, fallback candidate, or unresolved.
+1. a real-session direct failure/stall event, and
+2. a successful private NAS connection path to the same configured target.
 
-The endpoint must not become an SSRF primitive or generic port scanner. Caller-supplied target hosts, target ports, request payloads, and URLs are rejected.
+Only then is the domain eligible for a fallback canary.
 
-### 7.3 Logging
+## 8. NAS scheduling
 
-Normal proxy sessions do not add destination logging as part of B2.
-
-Diagnostic events may log the configured target key, path result, and timing, but not arbitrary browsing history or proxy payloads.
-
-## 8. NAS optimizer scheduling
-
-The optimizer container supports both one-shot and scheduler operation:
+The optimizer supports:
 
 ```text
 optimizer run --mode fast
@@ -403,14 +404,14 @@ optimizer run --mode full
 optimizer daemon
 ```
 
-Default daemon cadence:
+Defaults:
 
-- Fast cycle every 6 hours.
-- Full cycle daily.
+- fast cycle every 6 hours;
+- full cycle daily.
 
-The Docker deployment must also permit operators to disable the internal scheduler and invoke one-shot runs from NAS cron/task scheduler instead.
+Operators may disable the internal scheduler and invoke one-shot runs from NAS cron/task scheduler.
 
-Only one optimizer cycle may publish at a time. The process uses a local lock and a server-side expected-current revision check to prevent concurrent stale publishers.
+Only one cycle may publish at once. A local process lock plus Worker `expected_current_revision` enforces this on both sides.
 
 ## 9. Configuration and secrets
 
@@ -422,193 +423,194 @@ Only one optimizer cycle may publish at a time. The process uses a local lock an
 
 ### Non-secret Worker configuration
 
-Expected new settings include:
+Expected additions:
 
-- optimizer probe enablement and fixed payload size.
-- VPC binding name.
-- NAS egress private address and port.
-- fallback domain suffix list.
-- force-egress domain suffix list.
-- diagnostic target allowlist.
-- first-byte fallback timeout.
+- allowed Cloudflare optimizer CIDRs;
+- VPC binding name;
+- NAS egress private address/port;
+- `fallback_domains`;
+- `force_egress_domains`;
+- diagnostic target allowlist;
+- first-byte timeout (default 8 s).
 
-No Cloudflare account API token, Global API Key, Tunnel token, or NAS secret is committed to the repository.
+No Cloudflare account API token, Global API Key, Tunnel token, or NAS secret is committed.
 
 ### NAS secrets
 
-The optimizer receives only:
+`edge-optimizer` receives only:
 
-- `OPTIMIZER_TOKEN`.
-- production Worker base URL.
+- `OPTIMIZER_TOKEN`;
+- Worker base URL.
 
-The Cloudflare Tunnel credential is stored separately for `cloudflared` and is not passed into the optimizer container.
+`cloudflared` receives its Tunnel credential separately. The optimizer container does not receive it.
 
 ## 10. Testing strategy
 
-### 10.1 Unit tests
+### Unit tests
 
-At minimum cover:
+At minimum:
 
-- Cloudflare candidate-range membership validation.
+- CIDR membership validation.
 - `/24` diversity enforcement.
-- candidate scoring and stable tie-breaking.
+- score ordering/stable tie-breaking.
+- current-pool unhealthy definition.
 - 15% hysteresis gate.
-- insufficient-healthy-candidate no-publish behavior.
-- machine-token authentication.
-- pool revision and rollback semantics.
-- domain suffix matching and boundary cases.
-- direct/fallback/force policy resolution.
-- first-byte timeout state transition.
-- no fallback after response bytes have already been forwarded.
-- NAS SOCKS5 handshake over injected VPC dialer.
+- insufficient-candidate no-publish path.
+- machine authentication and route scoping.
+- `expected_current_revision` conflict -> 409/no mutation.
+- revision/rollback semantics.
+- domain suffix boundary matching.
+- direct/fallback/force resolution.
+- first-byte timeout transition.
+- no fallback after first response byte.
+- SOCKS5 handshake over injected VPC dialer.
 
-### 10.2 Integration tests
+### Integration tests
 
-Use local mock TCP servers to simulate:
+Local deterministic mocks simulate:
 
-- direct success.
-- direct open failure followed by NAS success.
-- direct connection with no first byte followed by NAS success.
-- direct success with bytes, proving no mid-stream fallback occurs.
-- NAS unavailable.
-- force-egress unavailable.
+- direct success;
+- direct open failure -> NAS success;
+- direct open/no first byte -> NAS success;
+- direct response bytes -> no fallback;
+- NAS unavailable;
+- force-egress unavailable;
+- stale optimizer publisher conflict;
+- publish verification failure -> rollback.
 
-Optimizer integration tests use deterministic mock candidate metrics and a mock publisher API; CI must not benchmark random Internet Cloudflare addresses.
+CI never benchmarks random live Cloudflare Internet addresses.
 
-### 10.3 Production canary
+### Production canary sequence
 
-Before adding production fallback domains:
-
-1. Deploy diagnostics and VPC/NAS egress with no fallback policy enabled.
-2. Confirm Google direct baseline remains healthy.
-3. Compare direct versus NAS results for X and the current JavDB hostname.
-4. Add only targets for which evidence shows NAS egress materially resolves the failure.
-5. Verify actual client page loading through the imported subscription.
+1. Deploy machine API, observation-only diagnostics, and private NAS connectivity with no fallback domains.
+2. Confirm Google/Instagram remain healthy direct baselines.
+3. Generate real-session evidence for X and current JavDB target.
+4. Confirm NAS path can open the same configured target.
+5. Add one evidence-backed fallback target as canary.
+6. Verify actual page loading through the imported subscription.
+7. Expand only after the canary passes.
 
 ## 11. Observability
 
-Optimizer run summary records:
+Optimizer summary:
 
-- run ID and mode.
-- candidate count.
-- eligible count.
-- current and proposed pool revisions.
-- promotion/no-promotion reason.
-- aggregate latency and reliability statistics.
+- run ID/mode;
+- sampled and eligible counts;
+- current/proposed revisions;
+- promotion/no-promotion reason;
+- aggregate reliability/latency statistics.
 
-Worker egress metrics should use bounded counters/log samples for:
+Bounded Worker egress events/counters:
 
-- direct attempt success/failure.
-- first-byte timeout count.
-- NAS fallback attempt/success/failure.
+- direct open success/failure;
+- first-byte timeout;
+- fallback attempt/success/failure;
 - force-egress attempt/success/failure.
 
-Do not log tunnel credentials, optimizer tokens, full proxy URLs, or arbitrary destination payloads.
+Never log tunnel credentials, optimizer tokens, full proxy URLs, arbitrary destination payloads, or normal browsing history.
 
-## 12. Deployment sequence
-
-Implementation and rollout are intentionally staged:
+## 12. Deployment stages
 
 ### Stage A — diagnostics and contracts
 
-- Machine auth.
-- Optimizer probe endpoint.
-- Pool publisher/version/rollback API.
-- Domain-policy parser and egress diagnostics.
-- No automatic production ADD update yet.
-- No production fallback domains yet.
+- machine auth;
+- bounded optimizer probe;
+- pool publisher/version/rollback API;
+- domain policy parser;
+- synthetic egress diagnostic;
+- real-session observation-only diagnostics;
+- no automatic production `ADD.txt` update;
+- no production fallback domains.
 
 ### Stage B — NAS ingress optimizer
 
-- Optimizer container.
-- Candidate sampler/prober/scorer.
-- Dry-run reports.
-- Controlled publish to `ADD.txt`.
-- Verify rollback and last-known-good behavior.
+- optimizer container;
+- candidate sampler/prober/scorer;
+- dry-run reporting;
+- controlled pool publish;
+- last-known-good and rollback verification.
 
 ### Stage C — private NAS egress
 
-- Dedicated Cloudflare Tunnel.
-- Workers VPC Network binding.
-- Internal-only NAS SOCKS5 egress.
-- Direct/NAS diagnostic comparison.
+- dedicated Cloudflare Tunnel;
+- Workers VPC Network binding;
+- internal-only SOCKS5 egress;
+- direct/NAS diagnostic comparison.
 
 ### Stage D — selective production fallback
 
-- Add evidence-backed fallback domains.
-- Validate X/JavDB behavior from the real client.
-- Keep known-good destinations direct.
+- add only evidence-backed fallback domains;
+- validate X/JavDB from the real client;
+- keep known-good destinations direct.
 
-Stages must be independently revertible.
+Each stage is independently revertible.
 
 ## 13. Rollback
 
-### Ingress optimizer rollback
+Ingress:
 
-- Disable optimizer scheduler.
-- `POST /ops/optimizer/v1/rollback` to restore the previous pool.
-- Existing subscriptions continue using the last materialized `ADD.txt` if the NAS is offline.
+- stop/disable optimizer scheduler;
+- restore previous pool through revision-checked rollback;
+- if NAS is offline, the last materialized `ADD.txt` remains usable.
 
-### Egress rollback
+Egress:
 
-- Empty fallback and force-egress domain lists to restore all-direct behavior without removing VPC infrastructure.
-- If required, deploy the prior Worker version through the existing Cloudflare deployment history.
-- Stopping the NAS egress containers must not affect direct-only destinations.
+- empty fallback/force lists to return to all-direct forwarding without deleting VPC infrastructure;
+- deploy a prior Worker version if required;
+- stopping NAS egress must not affect direct-only traffic.
 
 ## 14. Security invariants
 
-The implementation is not acceptable unless all of these remain true:
+Implementation is unacceptable unless all remain true:
 
-1. No public NAS SOCKS5/CONNECT listener.
-2. No Cloudflare account API token on the NAS optimizer.
-3. `OPTIMIZER_TOKEN` cannot access browser-admin endpoints.
-4. Optimizer publisher can publish only validated Cloudflare IPv4:443 candidates.
-5. Diagnostics cannot target arbitrary hosts or ports.
-6. NAS egress is not a default global route.
-7. Existing direct traffic remains independent of NAS availability.
-8. Production fallback domains are added only after diagnostic evidence.
-9. Optimizer failure cannot erase a last-known-good `ADD.txt` pool.
-10. No new browsing-destination logging is introduced for normal sessions.
+1. No public/NAS-host proxy listener.
+2. No Cloudflare account API token in `edge-optimizer`.
+3. `OPTIMIZER_TOKEN` cannot access browser-admin routes.
+4. Automatic publisher accepts only validated Cloudflare IPv4:443 candidates.
+5. Diagnostic API cannot target arbitrary hosts/ports/URLs.
+6. Normal session logging does not gain arbitrary destination history.
+7. NAS egress is never the implicit global default.
+8. Direct-only traffic is independent of NAS availability.
+9. Fallback domains require diagnostic evidence first.
+10. Optimizer failure cannot erase the last-known-good pool.
+11. External egress container image is immutable-digest pinned if not repository-owned.
 
 ## 15. Acceptance criteria
 
-B2 is complete only when all of the following are demonstrated:
-
 ### Ingress
 
-- A NAS full cycle measures a bounded candidate set and selects an eligible Top-8 pool.
-- Pool entries obey `/24` diversity and Cloudflare IPv4:443 validation.
-- The optimizer can publish a new revision through the machine API.
-- Subscription generation reflects the new `ADD.txt` pool.
-- A failed optimization cycle leaves the previous pool untouched.
-- Explicit rollback restores the prior pool.
+- NAS full cycle measures a bounded candidate set and selects an eligible Top-8.
+- Top-8 satisfies CIDR, 443, duplicate and `/24` diversity gates.
+- Revision-checked publish updates `ADD.txt` and subscription output.
+- Failed/noisy cycles leave production untouched.
+- Explicit rollback restores the previous pool.
 
 ### Egress
 
 - NAS SOCKS5 has no host/public port mapping.
-- Worker reaches it only through the private Workers VPC/Tunnel path.
-- Google and Instagram continue to work directly.
-- Diagnostics compare direct and NAS paths for X and the current JavDB hostname.
-- Any domain added to fallback policy demonstrably loads through the real client after the change.
+- Worker reaches NAS egress only through Workers VPC/Tunnel.
+- Google and Instagram remain direct and functional.
+- Observation mode produces evidence for X and current JavDB target without logging arbitrary browsing history.
+- Any enabled fallback domain demonstrably loads from the real client after the canary.
 - NAS shutdown does not break direct-only destinations.
 
 ### Operations
 
-- NAS deployment is reproducible with repository-provided Docker Compose/config templates.
+- NAS deployment is reproducible from repository Docker Compose/config templates.
 - Secrets are documented but never committed.
-- Fast/full optimizer schedules are documented.
+- Fast/full schedules are documented.
 - Run history and last-known-good state survive container restart.
-- Unit and integration tests pass in CI without depending on live random Internet benchmarks.
+- Unit/integration CI passes without live random Internet benchmarking.
 
 ## 16. Non-goals for B2 v1
 
-- Global all-traffic routing through the NAS.
-- Publicly exposed NAS proxy ports.
-- Optimizing multiple ISPs or mobile networks in one deployment.
+- Global all-traffic NAS routing.
+- Public NAS proxy ports.
+- Multi-ISP/mobile optimization in one instance.
 - IPv6 ingress optimization.
 - Alternate Cloudflare TLS ports.
-- Automatically consuming third-party preferred-IP or ProxyIP feeds.
-- Mid-stream route migration after response bytes have begun.
+- Automatic third-party preferred-IP/ProxyIP feeds.
+- Mid-stream route migration after response bytes begin.
 - Arbitrary remote network diagnostics.
-- Replacing the existing client-side `url-test` / health-check functionality.
-- Proving in advance that X or JavDB failures have one specific Cloudflare root cause; the diagnostics stage must establish that evidence first.
+- Replacing client-side `url-test`/health-check selection.
+- Assuming in advance that X/JavDB share one Cloudflare root cause.
