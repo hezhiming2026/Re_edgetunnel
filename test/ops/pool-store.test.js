@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as poolAuthority from '../../src/ops/pool-authority-core.js';
+import * as poolStore from '../../src/ops/pool-store.js';
 import {
     publishAuthoritativePool,
     readAuthoritativeAddTxt,
@@ -132,6 +133,35 @@ test('clearing manual ADD override reveals optimizer pool again', () => {
     assert.equal(typeof poolAuthority.setManualAuthoritativeAddTxt, 'function');
     poolAuthority.setManualAuthoritativeAddTxt(storage, '   ');
     assert.equal(readAuthoritativeAddTxt(storage), '104.16.1.1:443#optimizer\n');
+});
+
+test('manual ADD writes use durable authority when binding exists', async () => {
+    let written = null;
+    let kvWrites = 0;
+    const env = {
+        OPTIMIZER_COORDINATOR: {
+            getByName(name) {
+                assert.equal(name, 'optimizer-pool-v1');
+                return {
+                    async setManualAddTxt(value) {
+                        written = value;
+                        return value;
+                    },
+                };
+            },
+        },
+        KV: {
+            async put() {
+                kvWrites++;
+            },
+        },
+    };
+
+    assert.equal(typeof poolStore.writeManualAddTxt, 'function');
+    const result = await poolStore.writeManualAddTxt(env, 'manual.example.com:443#manual\n');
+    assert.equal(written, 'manual.example.com:443#manual\n');
+    assert.equal(result, 'manual.example.com:443#manual\n');
+    assert.equal(kvWrites, 0);
 });
 
 test('legacy fallback is allowed only when durable binding is absent or uninitialized', async () => {
