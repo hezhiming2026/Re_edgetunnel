@@ -85,6 +85,15 @@ export function rollbackAuthoritativePool(storage, expectedCurrentRevision, now 
     return result;
 }
 
+export function setManualAuthoritativeAddTxt(storage, value) {
+    const text = typeof value === 'string' ? value : '';
+    storage.transactionSync(() => {
+        if (text.trim()) storage.kv.put('manual_add_txt', text);
+        else storage.kv.delete('manual_add_txt');
+    });
+    return readAuthoritativeAddTxt(storage);
+}
+
 export function readAuthoritativePoolStatus(storage) {
     return {
         current: storage.kv.get('current') ?? null,
