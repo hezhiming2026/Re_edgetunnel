@@ -77,7 +77,7 @@ rule_payload="$(jq -nc --arg host "$EDGE_HOSTNAME" --arg ref "$RULE_REF" '{
   description: "Disable Under Attack/Security Level challenge only for the EdgeTunnel hostname",
   ref: $ref,
   enabled: true,
-  action_parameters: {security_level: "off"}
+  action_parameters: {security_level: "essentially_off"}
 }')"
 
 if [[ -z "$ruleset_id" ]]; then
@@ -90,10 +90,10 @@ if [[ -z "$ruleset_id" ]]; then
   }')"
 
   cf_request POST "/zones/${zone_id}/rulesets" "$create_payload" >/dev/null || {
-    echo 'Unable to create the Configuration Rule. Add Config Settings Write (preferred) or Zone WAF Write to the API token.' >&2
+    echo 'Unable to create the Configuration Rule. The current Cloudflare plan may not permit this Security Level override.' >&2
     exit 1
   }
-  echo "Created Security Level override for ${EDGE_HOSTNAME}."
+  echo "Created Security Level override for ${EDGE_HOSTNAME} (essentially_off)."
   exit 0
 fi
 
@@ -102,14 +102,14 @@ rule_id="$(jq -r --arg ref "$RULE_REF" '.result.rules[]? | select(.ref == $ref) 
 
 if [[ -n "$rule_id" ]]; then
   cf_request PATCH "/zones/${zone_id}/rulesets/${ruleset_id}/rules/${rule_id}" "$rule_payload" >/dev/null || {
-    echo 'Unable to update the Configuration Rule. Add Config Settings Write (preferred) or Zone WAF Write to the API token.' >&2
+    echo 'Unable to update the Configuration Rule. The current Cloudflare plan may not permit this Security Level override.' >&2
     exit 1
   }
-  echo "Updated Security Level override for ${EDGE_HOSTNAME}."
+  echo "Updated Security Level override for ${EDGE_HOSTNAME} (essentially_off)."
 else
   cf_request POST "/zones/${zone_id}/rulesets/${ruleset_id}/rules" "$rule_payload" >/dev/null || {
-    echo 'Unable to add the Configuration Rule. Add Config Settings Write (preferred) or Zone WAF Write to the API token.' >&2
+    echo 'Unable to add the Configuration Rule. The current Cloudflare plan may not permit this Security Level override.' >&2
     exit 1
   }
-  echo "Added Security Level override for ${EDGE_HOSTNAME}."
+  echo "Added Security Level override for ${EDGE_HOSTNAME} (essentially_off)."
 fi
