@@ -46,7 +46,12 @@ export class OptimizerCoordinator extends DurableObject {
     }
 
     async publishPool(request) {
-        const result = publishAuthoritativePool(this.ctx.storage, request);
+        let legacyManualAddTxt = null;
+        const status = readAuthoritativePoolStatus(this.ctx.storage);
+        if (!status.current && this.env?.KV) {
+            legacyManualAddTxt = await this.env.KV.get('ADD.txt');
+        }
+        const result = publishAuthoritativePool(this.ctx.storage, request, legacyManualAddTxt);
         if (!result.ok) return result;
         const mirror = await this.mirror(result);
         return {
