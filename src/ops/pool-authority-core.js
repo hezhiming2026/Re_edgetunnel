@@ -19,8 +19,10 @@ export function publishAuthoritativePool(storage, request, legacyManualAddTxt = 
         const snapshot = request.snapshot;
         const previous = current;
         const legacyManual = normalizeLegacyManualAddTxt(legacyManualAddTxt);
-        if (!current && legacyManual && !storage.kv.get('manual_add_txt')) {
-            storage.kv.put('manual_add_txt', legacyManual);
+        const manualInitialized = storage.kv.get('manual_add_initialized') === true;
+        if (!current && legacyManual && !manualInitialized) {
+            storage.kv.put('manual_add_initialized', true);
+            if (!storage.kv.get('manual_add_txt')) storage.kv.put('manual_add_txt', legacyManual);
         }
         storage.kv.put(`pool:${snapshot.revision}`, snapshot);
         if (previous) storage.kv.put('previous', previous);
@@ -96,6 +98,7 @@ export function rollbackAuthoritativePool(storage, expectedCurrentRevision, now 
 export function setManualAuthoritativeAddTxt(storage, value) {
     const text = typeof value === 'string' ? value : '';
     storage.transactionSync(() => {
+        storage.kv.put('manual_add_initialized', true);
         if (text.trim()) storage.kv.put('manual_add_txt', text);
         else storage.kv.delete('manual_add_txt');
     });
