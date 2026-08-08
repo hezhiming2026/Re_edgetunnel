@@ -11,6 +11,8 @@ import { parseSpeedTestDomains, parseSpeedTestMode } from './core/speedtest.js';
 import { handleGrpcRequest, handleXHttpRequest } from './core/http-tunnel.js';
 import { parseUpstreamProxy } from './protocols/upstream.js';
 import { authenticateMachineRequest, machineUnauthorized } from './ops/auth.js';
+import { directDiagnosticDial } from './ops/direct-dial-worker.js';
+import { handleEgressDiagnose } from './ops/egress-diagnostics.js';
 import { parseEgressRuntimeConfig } from './ops/egress-policy.js';
 import { handleOptimizerRequest } from './ops/optimizer-api.js';
 
@@ -79,6 +81,9 @@ export default {
         if (pathLower === 'ops' || pathLower.startsWith('ops/')) {
             const authenticated = await authenticateMachineRequest(request, env);
             if (!authenticated) return machineUnauthorized();
+            if (pathLower === 'ops/egress/v1/diagnose') {
+                return handleEgressDiagnose(request, env, createProxyConfig(), { directDial: directDiagnosticDial });
+            }
             return handleOptimizerRequest(request, env, pathLower);
         }
 
