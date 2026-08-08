@@ -64,6 +64,17 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
 
+      - name: Validate optimizer runtime secret
+        shell: bash
+        env:
+          OPTIMIZER_TOKEN: ${{ secrets.EDGETUNNEL_OPTIMIZER_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${OPTIMIZER_TOKEN}" || ${#OPTIMIZER_TOKEN} -lt 24 ]]; then
+            echo '::error::EDGETUNNEL_OPTIMIZER_TOKEN must be configured and at least 24 characters.'
+            exit 1
+          fi
+
       - name: Provision production KV and prepare Wrangler config
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -82,9 +93,11 @@ jobs:
           secrets: |
             ADMIN
             UUID
+            OPTIMIZER_TOKEN
         env:
           ADMIN: ${{ secrets.EDGETUNNEL_ADMIN }}
           UUID: ${{ secrets.EDGETUNNEL_UUID }}
+          OPTIMIZER_TOKEN: ${{ secrets.EDGETUNNEL_OPTIMIZER_TOKEN }}
 
       - name: Configure hostname Security Level override
         id: security
