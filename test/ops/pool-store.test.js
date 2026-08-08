@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import * as poolAuthority from '../../src/ops/pool-authority-core.js';
 import {
     publishAuthoritativePool,
     readAuthoritativeAddTxt,
@@ -120,6 +121,17 @@ test('manual ADD override takes precedence over optimizer pool', () => {
     });
 
     assert.equal(readAuthoritativeAddTxt(storage), 'manual.example.com:443#manual\n');
+});
+
+test('clearing manual ADD override reveals optimizer pool again', () => {
+    const storage = new MemorySyncStorage({
+        add_txt: '104.16.1.1:443#optimizer\n',
+        manual_add_txt: 'manual.example.com:443#manual\n',
+    });
+
+    assert.equal(typeof poolAuthority.setManualAuthoritativeAddTxt, 'function');
+    poolAuthority.setManualAuthoritativeAddTxt(storage, '   ');
+    assert.equal(readAuthoritativeAddTxt(storage), '104.16.1.1:443#optimizer\n');
 });
 
 test('legacy fallback is allowed only when durable binding is absent or uninitialized', async () => {
