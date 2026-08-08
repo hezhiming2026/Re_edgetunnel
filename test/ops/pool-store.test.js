@@ -1,86 +1,108 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseAllowedCidrs, publishPool, readPoolStatus, rollbackPool } from '../../src/ops/pool-store.js';
+import {
+    publishAuthoritativePool,
+    readAuthoritativeAddTxt,
+    readAuthoritativePoolStatus,
+    rollbackAuthoritativePool,
+} from '../../src/ops/pool-authority-core.js';
+import { buildPoolSnapshot, formatAddTxt, parseAllowedCidrs, validatePoolEntries } from '../../src/ops/pool-store.js';
 
-class MemoryKV {
+class MemorySyncStorage {
     constructor(seed = {}) {
         this.map = new Map(Object.entries(seed));
-        this.puts = [];
+        this.mutations = [];
+        this.kv = {
+            get: (key) => this.map.get(key),
+            put: (key, value) => {
+                this.mutations.push(['put', key]);
+                this.map.set(key, structuredClone(value));
+            },
+            delete: (key) => {
+                this.mutations.push(['delete', key]);
+                this.map.delete(key);
+            },
+        };
     }
 
-    async get(key) {
-        return this.map.has(key) ? this.map.get(key) : null;
-    }
-
-    async put(key, value) {
-        this.puts.push([key, String(value)]);
-        this.map.set(key, String(value));
+    transactionSync(callback) {
+        callback();
     }
 }
 
 const allowed = parseAllowedCidrs('104.16.0.0/13,172.64.0.0/13');
-
 const entry = (address, name) => ({ address, port: 443, name });
 
-test('stale expected revision performs no writes', async () => {
-    const kv = new MemoryKV({
-        'optimizer:current': 'rev-new',
-        'ADD.txt': '104.16.1.1:443#old\n',
+async function requestFor(address, name, expected, iso) {
+    const entries = validatePoolEntries([entry(address, name)], allowed);
+    const snapshot = await buildPoolSnapshot(entries, new Date(iso));
+    return {
+        expected_current_revision: expected,
+        snapshot,
+        add_txt: formatAddTxt(entries),
+    };
+}
+
+test('two mutations using the same expected revision cannot both succeed', async () => {
+    const storage = new MemorySyncStorage();
+    const firstRequest = await requestFor('104.16.1.1', 'first', null, '2026-08-08T00:00:00.000Z');
+    const competingRequest = await requestFor('104.16.2.2', 'second', null, '2026-08-08T00:00:01.000Z');
+
+    const first = publishAuthoritativePool(storage, firstRequest);
+    assert.equal(first.ok, true);
+    const mutationsAfterFirst = storage.mutations.length;
+
+    const second = publishAuthoritativePool(storage, competingRequest);
+    assert.deepEqual(second, {
+        ok: false,
+        status: 409,
+        error: 'Current optimizer revision changed',
     });
-    const env = { KV: kv };
-
-    await assert.rejects(() => publishPool(env, {
-        expected_current_revision: 'rev-old',
-        entries: [entry('104.16.2.2', 'new')],
-    }, allowed), (error) => error.status === 409);
-
-    assert.equal(await kv.get('ADD.txt'), '104.16.1.1:443#old\n');
-    assert.deepEqual(kv.puts, []);
+    assert.equal(storage.mutations.length, mutationsAfterFirst);
+    assert.equal(readAuthoritativePoolStatus(storage).current, firstRequest.snapshot.revision);
+    assert.equal(readAuthoritativeAddTxt(storage), '104.16.1.1:443#first\n');
 });
 
-test('first and second publish create immutable revisions and rollback restores previous pool', async () => {
-    const kv = new MemoryKV();
-    const env = { KV: kv };
+test('publish sequence and rollback are atomic against authoritative state', async () => {
+    const storage = new MemorySyncStorage();
+    const firstRequest = await requestFor('104.16.1.1', 'first', null, '2026-08-08T00:00:00.000Z');
+    const first = publishAuthoritativePool(storage, firstRequest);
+    assert.equal(first.ok, true);
 
-    const first = await publishPool(env, {
-        expected_current_revision: null,
-        entries: [entry('104.16.1.1', 'first')],
-    }, allowed);
-    assert.match(first.revision, /^\d{8}T\d{9}Z-[0-9a-f]{12}$/);
-    assert.equal(first.previous, null);
-    assert.equal(await kv.get('optimizer:current'), first.revision);
-    assert.equal(await kv.get('ADD.txt'), '104.16.1.1:443#first\n');
-    assert.ok(await kv.get(`optimizer:pool:${first.revision}`));
-
-    const second = await publishPool(env, {
-        expected_current_revision: first.revision,
-        entries: [entry('104.16.2.2', 'second')],
-    }, allowed);
+    const secondRequest = await requestFor('104.16.2.2', 'second', first.revision, '2026-08-08T00:00:01.000Z');
+    const second = publishAuthoritativePool(storage, secondRequest);
+    assert.equal(second.ok, true);
     assert.equal(second.previous, first.revision);
-    assert.equal(await kv.get('optimizer:previous'), first.revision);
-    assert.equal(await kv.get('optimizer:current'), second.revision);
-    assert.equal(await kv.get('ADD.txt'), '104.16.2.2:443#second\n');
+    assert.equal(readAuthoritativeAddTxt(storage), '104.16.2.2:443#second\n');
 
-    const rolledBack = await rollbackPool(env, second.revision);
-    assert.equal(rolledBack.revision, first.revision);
-    assert.equal(await kv.get('optimizer:current'), first.revision);
-    assert.equal(await kv.get('optimizer:previous'), second.revision);
-    assert.equal(await kv.get('ADD.txt'), '104.16.1.1:443#first\n');
+    const rollback = rollbackAuthoritativePool(storage, second.revision, '2026-08-08T00:00:02.000Z');
+    assert.equal(rollback.ok, true);
+    assert.equal(rollback.revision, first.revision);
+    assert.equal(readAuthoritativeAddTxt(storage), '104.16.1.1:443#first\n');
 
-    const status = await readPoolStatus(env);
+    const status = readAuthoritativePoolStatus(storage);
     assert.equal(status.current, first.revision);
     assert.equal(status.previous, second.revision);
     assert.equal(status.status.mutation, 'rollback');
 });
 
-test('rollback with stale expected revision performs no mutation', async () => {
-    const kv = new MemoryKV({
-        'optimizer:current': 'rev-current',
-        'optimizer:previous': 'rev-previous',
-        'ADD.txt': '104.16.1.1:443#current\n',
-    });
+test('stale rollback makes no authoritative mutation', async () => {
+    const storage = new MemorySyncStorage();
+    const firstRequest = await requestFor('104.16.1.1', 'first', null, '2026-08-08T00:00:00.000Z');
+    const first = publishAuthoritativePool(storage, firstRequest);
+    assert.equal(first.ok, true);
+    const mutationsBefore = storage.mutations.length;
 
-    await assert.rejects(() => rollbackPool({ KV: kv }, 'rev-stale'), (error) => error.status === 409);
-    assert.deepEqual(kv.puts, []);
-    assert.equal(await kv.get('ADD.txt'), '104.16.1.1:443#current\n');
+    const result = rollbackAuthoritativePool(storage, 'stale-revision');
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 409);
+    assert.equal(storage.mutations.length, mutationsBefore);
+    assert.equal(readAuthoritativePoolStatus(storage).current, first.revision);
+});
+
+test('snapshot revision is timestamp plus canonical checksum prefix', async () => {
+    const entries = validatePoolEntries([entry('104.16.3.3', 'rank-01')], allowed);
+    const snapshot = await buildPoolSnapshot(entries, new Date('2026-08-08T12:34:56.789Z'));
+    assert.match(snapshot.revision, /^20260808T123456789Z-[0-9a-f]{12}$/);
+    assert.match(snapshot.checksum, /^[0-9a-f]{64}$/);
 });
