@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  statuses: write
 
 jobs:
   validate:
@@ -43,6 +44,19 @@ jobs:
       cancel-in-progress: false
 
     steps:
+      - name: Mark deployment pending
+        uses: actions/github-script@v8
+        with:
+          script: |
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: context.sha,
+              state: 'pending',
+              context: 'cloudflare/production',
+              description: 'Deploying edge.tianbufu.click'
+            });
+
       - name: Check out repository
         uses: actions/checkout@v6
 
@@ -81,3 +95,20 @@ jobs:
           done
           echo "Deployment completed, but the custom domain did not become reachable during the verification window." >&2
           exit 1
+
+      - name: Publish deployment result
+        if: always()
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const state = '${{ job.status }}' === 'success' ? 'success' : 'failure';
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: context.sha,
+              state,
+              context: 'cloudflare/production',
+              description: state === 'success'
+                ? 'edge.tianbufu.click deployed and verified'
+                : 'Cloudflare production deployment failed'
+            });
