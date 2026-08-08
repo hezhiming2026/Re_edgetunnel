@@ -7,3 +7,14 @@ test('wrangler declares sqlite durable optimizer coordinator', async () => {
     assert.match(config, /\[\[durable_objects\.bindings\]\][\s\S]*name = "OPTIMIZER_COORDINATOR"[\s\S]*class_name = "OptimizerCoordinator"/);
     assert.match(config, /\[exports\.OptimizerCoordinator\][\s\S]*type = "durable-object"[\s\S]*storage = "sqlite"/);
 });
+
+test('browser ADD mutations route through durable coordinator instead of KV', async () => {
+    const adminSource = await readFile(new URL('../../src/controllers/admin.js', import.meta.url), 'utf8');
+    const coordinatorSource = await readFile(new URL('../../src/ops/optimizer-coordinator.js', import.meta.url), 'utf8');
+
+    assert.match(adminSource, /writeManualAddTxt/);
+    assert.match(adminSource, /await\s+writeManualAddTxt\(env,\s*txt\)/);
+    assert.doesNotMatch(adminSource, /env\.KV\.put\(['"]ADD\.txt['"],\s*txt\)/);
+    assert.match(coordinatorSource, /setManualAddTxt\s*\(value\)/);
+    assert.match(coordinatorSource, /setManualAuthoritativeAddTxt\(this\.ctx\.storage,\s*value\)/);
+});
