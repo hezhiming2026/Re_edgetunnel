@@ -64,16 +64,25 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
 
-      - name: Validate optimizer runtime secret
+      - name: Validate Stage A private runtime configuration
         shell: bash
         env:
           OPTIMIZER_TOKEN: ${{ secrets.EDGETUNNEL_OPTIMIZER_TOKEN }}
+          DIAGNOSTIC_TARGETS: ${{ secrets.EDGETUNNEL_DIAGNOSTIC_TARGETS }}
         run: |
           set -euo pipefail
           if [[ -z "${OPTIMIZER_TOKEN}" || ${#OPTIMIZER_TOKEN} -lt 24 ]]; then
             echo '::error::EDGETUNNEL_OPTIMIZER_TOKEN must be configured and at least 24 characters.'
             exit 1
           fi
+          node --input-type=module <<'NODE'
+          import { parseDiagnosticTargets } from './src/ops/egress-policy.js';
+          const parsed = parseDiagnosticTargets(process.env.DIAGNOSTIC_TARGETS || '');
+          if (parsed.size < 1) {
+            console.error('::error::EDGETUNNEL_DIAGNOSTIC_TARGETS must contain at least one valid key=hostname:port entry.');
+            process.exit(1);
+          }
+          NODE
 
       - name: Provision production KV and prepare Wrangler config
         env:
@@ -94,10 +103,12 @@ jobs:
             ADMIN
             UUID
             OPTIMIZER_TOKEN
+            DIAGNOSTIC_TARGETS
         env:
           ADMIN: ${{ secrets.EDGETUNNEL_ADMIN }}
           UUID: ${{ secrets.EDGETUNNEL_UUID }}
           OPTIMIZER_TOKEN: ${{ secrets.EDGETUNNEL_OPTIMIZER_TOKEN }}
+          DIAGNOSTIC_TARGETS: ${{ secrets.EDGETUNNEL_DIAGNOSTIC_TARGETS }}
 
       - name: Configure hostname Security Level override
         id: security
