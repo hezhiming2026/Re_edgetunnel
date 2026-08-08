@@ -136,6 +136,19 @@ test('first publish preserves a pre-DO legacy manual ADD override', async () => 
     assert.equal(storage.map.get('add_txt'), '104.16.1.1:443#optimizer\n');
 });
 
+test('explicit manual clear before first publish blocks stale legacy reimport', async () => {
+    const storage = new MemorySyncStorage();
+    poolAuthority.setManualAuthoritativeAddTxt(storage, '   ');
+    const firstRequest = await requestFor('104.16.1.1', 'optimizer', null, '2026-08-08T00:00:00.000Z');
+
+    const result = publishAuthoritativePool(storage, firstRequest, 'legacy.example.com:443#stale-manual\n');
+
+    assert.equal(result.ok, true);
+    assert.equal(storage.map.get('manual_add_initialized'), true);
+    assert.equal(storage.map.has('manual_add_txt'), false);
+    assert.equal(readAuthoritativeAddTxt(storage), '104.16.1.1:443#optimizer\n');
+});
+
 test('clearing manual ADD override reveals optimizer pool again', () => {
     const storage = new MemorySyncStorage({
         add_txt: '104.16.1.1:443#optimizer\n',
