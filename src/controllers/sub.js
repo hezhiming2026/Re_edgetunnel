@@ -3,7 +3,7 @@ import { MD5MD5, batchReplaceDomain, buildProxyUri, buildShadowsocksUri, normali
 import { generateRandomIP, parseLocalAddressList } from "../utils/ip.js";
 import { SingboxPatch, ClashPatch, SurgePatch } from "../utils/patches.js";
 import { logRequest } from "../config.js";
-import { readOptimizerAddTxt } from "../ops/pool-store.js";
+import { readOptimizerAddState } from "../ops/pool-store.js";
 
 async function getECH(host, dohUrl) {
     if (!dohUrl) return '';
@@ -64,8 +64,8 @@ export async function handleSub(request, env, config, ctx) {
         const echValue = config.ECH && config.ECHConfig?.DNS ? (config.ECHConfig.SNI ? config.ECHConfig.SNI + '+' : '') + config.ECHConfig.DNS : null;
 
         if (config.优选订阅生成.local) {
-            const authoritativeAddTxt = await readOptimizerAddTxt(env);
-            const legacyAddTxt = authoritativeAddTxt || await env.KV.get('ADD.txt');
+            const authorityState = await readOptimizerAddState(env);
+            const legacyAddTxt = authorityState.initialized ? authorityState.add_txt : await env.KV.get('ADD.txt');
             const savedAddresses = parseLocalAddressList(legacyAddTxt);
             let addressEntries = savedAddresses;
             if (!addressEntries.length) {
