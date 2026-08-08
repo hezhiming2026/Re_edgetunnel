@@ -2,7 +2,11 @@ function normalizeExpected(value) {
     return value === undefined ? null : value;
 }
 
-export function publishAuthoritativePool(storage, request) {
+function normalizeLegacyManualAddTxt(value) {
+    return typeof value === 'string' && value.trim() ? value : null;
+}
+
+export function publishAuthoritativePool(storage, request, legacyManualAddTxt = null) {
     let result;
     storage.transactionSync(() => {
         const current = storage.kv.get('current') ?? null;
@@ -14,6 +18,10 @@ export function publishAuthoritativePool(storage, request) {
 
         const snapshot = request.snapshot;
         const previous = current;
+        const legacyManual = normalizeLegacyManualAddTxt(legacyManualAddTxt);
+        if (!current && legacyManual && !storage.kv.get('manual_add_txt')) {
+            storage.kv.put('manual_add_txt', legacyManual);
+        }
         storage.kv.put(`pool:${snapshot.revision}`, snapshot);
         if (previous) storage.kv.put('previous', previous);
         else storage.kv.delete('previous');
