@@ -394,6 +394,19 @@ Root-cause evidence for X/JavDB requires both:
 
 Only then is the domain eligible for a fallback canary.
 
+### 7.3 Explicit working hypothesis
+
+One plausible explanation is that a destination deliberately blocks or degrades Cloudflare/data-center-origin traffic. If that is the case, changing the client-side Cloudflare ingress IP cannot solve the destination problem because the destination still sees a Cloudflare Worker/data-center egress path.
+
+This is a hypothesis, not a conclusion. B2 must discriminate among at least these cases:
+
+1. **Ingress quality problem** — changing `ADD.txt` materially improves the failing service.
+2. **Worker direct-egress problem** — direct path stalls/fails while the private NAS egress path succeeds.
+3. **Destination policy against Cloudflare/data-center traffic** — behavior is consistent across Cloudflare ingress choices but succeeds from residential/private NAS egress.
+4. **Application/client/DNS problem** — neither Cloudflare ingress optimization nor NAS egress explains the failure.
+
+No production fallback rule is justified solely by the fact that a site loads indefinitely.
+
 ## 8. NAS scheduling
 
 The optimizer supports:
@@ -614,3 +627,19 @@ Implementation is unacceptable unless all remain true:
 - Arbitrary remote network diagnostics.
 - Replacing client-side `url-test`/health-check selection.
 - Assuming in advance that X/JavDB share one Cloudflare root cause.
+
+## 17. Privacy lifecycle and repository scrub
+
+The repository currently contains operator-specific deployment identifiers such as the production hostname/domain and related environment-specific documentation. These values are operationally useful during implementation and acceptance, but they are not required to remain permanently in the public source tree.
+
+After Stage D acceptance, perform a dedicated privacy scrub before declaring B2 closed:
+
+1. Replace operator-specific hostnames/domains in reusable code, examples, tests, Compose templates, and long-lived documentation with placeholders or environment-variable references such as `${EDGE_HOSTNAME}`.
+2. Delete or generalize one-off deployment request/result documents that no longer provide ongoing operational value.
+3. Remove environment-specific IDs, account labels, zone identifiers, tunnel identifiers, internal addresses, and similar deployment metadata from the current branch unless they are technically necessary and non-sensitive.
+4. Confirm no secrets, credentials, UUID values, tokens, or private NAS addresses were ever committed.
+5. Run a repository-wide text scan for the known operator-specific identifiers before final acceptance.
+
+A normal file deletion or replacement removes the value only from the current branch contents; it does **not** erase older Git objects or public commit history. Rewriting published Git history is a separate disruptive operation and is not part of B2 by default. If historical erasure is desired, it must be an explicit post-project operation with a force-push/history-rewrite plan.
+
+The implementation plans must therefore minimize the creation of new operator-specific literals from this point forward, even before the final scrub.
