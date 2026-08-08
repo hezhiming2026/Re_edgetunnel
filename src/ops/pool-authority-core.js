@@ -94,5 +94,5 @@ export function readAuthoritativePoolStatus(storage) {
 }
 
 export function readAuthoritativeAddTxt(storage) {
-    return storage.kv.get('add_txt') ?? null;
+    return storage.kv.get('manual_add_txt') ?? storage.kv.get('add_txt') ?? null;
 }
