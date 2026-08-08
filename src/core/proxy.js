@@ -278,6 +278,7 @@ export async function forwardDataTCP(host, portNum, rawData, ws, respHeader, rem
             newSocket = await connectDirect(proxyIP, 443, rawData, proxyList, enableProxyFallback);
         }
         remoteConnWrapper.socket = newSocket;
+        remoteConnWrapper.observer = null;
         newSocket.closed.catch(() => { }).finally(() => closeSocketQuietly(ws));
         void connectStreams(newSocket, ws, respHeader, null).catch(() => closeSocketQuietly(ws));
     }
@@ -296,7 +297,9 @@ export async function forwardDataTCP(host, portNum, rawData, ws, respHeader, rem
         try {
             const initialSocket = await connectDirect(host, portNum, rawData);
             observer?.openOk();
+            observer?.clientData(rawData?.byteLength || 0);
             remoteConnWrapper.socket = initialSocket;
+            remoteConnWrapper.observer = observer;
             initialSocket.closed.catch(() => { }).finally(() => closeSocketQuietly(ws));
             void connectStreams(initialSocket, ws, respHeader, proxyIP ? connectToProxy : null, observer).catch(() => closeSocketQuietly(ws));
         } catch (err) {
@@ -321,7 +324,7 @@ export async function handleWSRequest(request, yourUUID, proxyConfig) {
     const [clientSock, serverSock] = Object.values(wssPair);
     serverSock.binaryType = 'arraybuffer';
     serverSock.accept();
-    let remoteConnWrapper = { socket: null };
+    let remoteConnWrapper = { socket: null, observer: null };
     let isDnsQuery = false;
     let trojanUdpDecoder = null;
     let localSpeedTestSession = null;
@@ -340,6 +343,7 @@ export async function handleWSRequest(request, yourUUID, proxyConfig) {
     let handshakeBuffer = new Uint8Array(0);
     let idleTimer;
     const closeSession = () => {
+        remoteConnWrapper.observer?.finish();
         try { remoteConnWrapper.socket?.close(); } catch { }
         closeSocketQuietly(serverSock);
     };
@@ -380,6 +384,7 @@ export async function handleWSRequest(request, yourUUID, proxyConfig) {
     serverSock.addEventListener('close', () => {
         clearTimeout(idleTimer);
         clearTimeout(maxSessionTimer);
+        remoteConnWrapper.observer?.finish();
         try { remoteConnWrapper.socket?.close(); } catch { }
     });
     resetIdleTimer();
@@ -396,8 +401,10 @@ export async function handleWSRequest(request, yourUUID, proxyConfig) {
                     }
                     if (remoteConnWrapper.socket) {
                         const writer = remoteConnWrapper.socket.writable.getWriter();
-                        try { await writer.write(plaintext); }
-                        finally { writer.releaseLock(); }
+                        try {
+                            await writer.write(plaintext);
+                            remoteConnWrapper.observer?.clientData(plaintext.byteLength);
+                        } finally { writer.releaseLock(); }
                         continue;
                     }
 
@@ -433,8 +440,10 @@ export async function handleWSRequest(request, yourUUID, proxyConfig) {
             if (localSpeedTestSession) return localSpeedTestSession.push(chunk);
             if (remoteConnWrapper.socket) {
                 const writer = remoteConnWrapper.socket.writable.getWriter();
-                await writer.write(chunk);
-                writer.releaseLock();
+                try {
+                    await writer.write(chunk);
+                    remoteConnWrapper.observer?.clientData(chunk.byteLength);
+                } finally { writer.releaseLock(); }
                 return;
             }
 
