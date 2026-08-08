@@ -113,6 +113,15 @@ test('snapshot revision is timestamp plus canonical checksum prefix', async () =
     assert.match(snapshot.checksum, /^[0-9a-f]{64}$/);
 });
 
+test('manual ADD override takes precedence over optimizer pool', () => {
+    const storage = new MemorySyncStorage({
+        add_txt: '104.16.1.1:443#optimizer\n',
+        manual_add_txt: 'manual.example.com:443#manual\n',
+    });
+
+    assert.equal(readAuthoritativeAddTxt(storage), 'manual.example.com:443#manual\n');
+});
+
 test('legacy fallback is allowed only when durable binding is absent or uninitialized', async () => {
     assert.equal(await readOptimizerAddTxt({}), null);
     assert.equal(await readOptimizerAddTxt({
