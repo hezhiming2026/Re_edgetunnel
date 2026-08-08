@@ -11,6 +11,7 @@ import { parseSpeedTestDomains, parseSpeedTestMode } from './core/speedtest.js';
 import { handleGrpcRequest, handleXHttpRequest } from './core/http-tunnel.js';
 import { parseUpstreamProxy } from './protocols/upstream.js';
 import { authenticateMachineRequest, machineUnauthorized } from './ops/auth.js';
+import { parseEgressRuntimeConfig } from './ops/egress-policy.js';
 import { handleOptimizerRequest } from './ops/optimizer-api.js';
 
 export default {
@@ -49,6 +50,7 @@ export default {
                 hostname: env.DNS_RESOLVER,
                 port: Number(env.DNS_RESOLVER_PORT || 53),
             } : null,
+            ...parseEgressRuntimeConfig(env),
         });
 
         // --- WS Handling ---
