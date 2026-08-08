@@ -25,3 +25,11 @@ test('first optimizer publish migrates pre-DO ADD.txt through the durable author
     assert.match(coordinatorSource, /await\s+this\.env\.KV\.get\(['"]ADD\.txt['"]\)/);
     assert.match(coordinatorSource, /publishAuthoritativePool\(this\.ctx\.storage,\s*request,\s*legacyManualAddTxt\)/);
 });
+
+test('subscription honors initialized durable clear before legacy KV fallback', async () => {
+    const subSource = await readFile(new URL('../../src/controllers/sub.js', import.meta.url), 'utf8');
+
+    assert.match(subSource, /readOptimizerAddState/);
+    assert.match(subSource, /authorityState\.initialized\s*\?\s*authorityState\.add_txt\s*:\s*await\s+env\.KV\.get\(['"]ADD\.txt['"]\)/);
+    assert.doesNotMatch(subSource, /authoritativeAddTxt\s*\|\|\s*await\s+env\.KV\.get\(['"]ADD\.txt['"]\)/);
+});
