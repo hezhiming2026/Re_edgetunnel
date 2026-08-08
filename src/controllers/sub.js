@@ -3,6 +3,7 @@ import { MD5MD5, batchReplaceDomain, buildProxyUri, buildShadowsocksUri, normali
 import { generateRandomIP, parseLocalAddressList } from "../utils/ip.js";
 import { SingboxPatch, ClashPatch, SurgePatch } from "../utils/patches.js";
 import { logRequest } from "../config.js";
+import { readOptimizerAddTxt } from "../ops/pool-store.js";
 
 async function getECH(host, dohUrl) {
     if (!dohUrl) return '';
@@ -18,8 +19,6 @@ async function getECH(host, dohUrl) {
             if (ans.type !== 65 || !ans.data) continue;
             const match = ans.data.match(/ech=([^\s]+)/);
             if (match) return match[1].replace(/"/g, '');
-            // Simple hex parsing if needed, assumed string for now or skip complex parsing for brevity
-            // The full impl has complex parsing.
         }
         return '';
     } catch { return ''; }
@@ -32,7 +31,6 @@ export async function handleSub(request, env, config, ctx) {
     const subToken = await MD5MD5(host + userID);
 
     if (url.searchParams.get('token') !== subToken) {
-        // Double check against MD5(hostname + userID) vs just url param
         return new Response(JSON.stringify({ success: false, msg: "Invalid Token" }), { status: 403 });
     }
 
@@ -66,7 +64,9 @@ export async function handleSub(request, env, config, ctx) {
         const echValue = config.ECH && config.ECHConfig?.DNS ? (config.ECHConfig.SNI ? config.ECHConfig.SNI + '+' : '') + config.ECHConfig.DNS : null;
 
         if (config.优选订阅生成.local) {
-            const savedAddresses = parseLocalAddressList(await env.KV.get('ADD.txt'));
+            const authoritativeAddTxt = await readOptimizerAddTxt(env);
+            const legacyAddTxt = authoritativeAddTxt || await env.KV.get('ADD.txt');
+            const savedAddresses = parseLocalAddressList(legacyAddTxt);
             let addressEntries = savedAddresses;
             if (!addressEntries.length) {
                 const [generatedAddresses] = await generateRandomIP(request, config.优选订阅生成.本地IP库.随机数量, config.优选订阅生成.本地IP库.指定端口);
@@ -110,14 +110,9 @@ export async function handleSub(request, env, config, ctx) {
                 }
                 return proxyLinks;
             }).join('\n');
-        } else {
-            // Fetch from SUB
-            // Simplified: just return empty if remote not implemented in this plan
-            // The original used `优选订阅生成器HOST`
         }
         content = links;
     } else {
-        // Subconverter
         const subApi = config.订阅转换配置.SUBAPI;
         const subConfig = config.订阅转换配置.SUBCONFIG;
         if (!subApi || !subConfig) {
