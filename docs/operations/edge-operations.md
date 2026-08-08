@@ -10,13 +10,18 @@ export OPTIMIZER_TOKEN='<machine-token>'
 export ADMIN_PASSWORD='<browser-admin-password>'
 ```
 
-The production deployment secret is stored in GitHub as `EDGETUNNEL_OPTIMIZER_TOKEN` and uploaded to the Worker as `OPTIMIZER_TOKEN`. It must be at least 24 characters. Do not reuse `ADMIN`, `UUID`, or a Cloudflare API token.
+Private deployment configuration is stored in GitHub Actions secrets:
+
+- `EDGETUNNEL_OPTIMIZER_TOKEN` -> Worker secret `OPTIMIZER_TOKEN`; minimum 24 characters.
+- `EDGETUNNEL_DIAGNOSTIC_TARGETS` -> Worker secret `DIAGNOSTIC_TARGETS`; one or more comma-separated `key=hostname:port` entries.
+
+Do not reuse `ADMIN`, `UUID`, or a Cloudflare API token as the optimizer token. Real diagnostic hostnames stay out of committed `wrangler.toml`, examples, and long-lived documentation.
 
 ## Stage A invariants
 
 - `FALLBACK_DOMAINS` is empty.
 - `FORCE_EGRESS_DOMAINS` is empty.
-- `DIAGNOSTIC_TARGETS` contains no committed production hostnames. Configure target keys only in controlled deployment configuration when canary diagnostics are required.
+- `DIAGNOSTIC_TARGETS` is injected only at deploy time from the private GitHub secret; it is not a committed Worker var.
 - Machine API publishing accepts only the committed Cloudflare IPv4 allowlist on port 443.
 - Egress observation is diagnostic-only; an 8-second first-byte event does not close, retry, or reroute the connection.
 
@@ -67,7 +72,7 @@ The response must include `Cache-Control: no-store` and `X-Optimizer-Probe-Versi
 
 ## Revision-safe pool canary
 
-Do not run this section against production until a controlled canary pool is approved. The examples use documentation-only Cloudflare-shaped placeholders; replace them only with measured addresses from the configured allowlist.
+Do not run this section against production until a controlled canary pool is approved. Replace example values only with measured addresses from the configured Cloudflare allowlist.
 
 Read current revision:
 
@@ -94,6 +99,8 @@ curl -sS -X POST \
 After rollback, verify `optimizer:current` points to the previous immutable snapshot and the subscription materializes the restored `ADD.txt` pool.
 
 ## Egress diagnostic canary
+
+Before deployment, set `EDGETUNNEL_DIAGNOSTIC_TARGETS` in GitHub Actions secrets. The workflow validates that at least one entry parses successfully without printing the secret value.
 
 Synthetic diagnostics accept only a configured target key:
 
