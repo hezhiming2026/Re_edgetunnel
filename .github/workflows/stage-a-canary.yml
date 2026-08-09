@@ -1,0 +1,45 @@
+name: Stage A Canary Validation
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  canary:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && contains(github.event.head_commit.message, '[stage-a-canary-check]'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Resolve production base URL without duplicating hostname configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          EDGE_HOST="$(awk -F '"' '/^HOST = / {print $2; exit}' wrangler.toml)"
+          if [[ -z "$EDGE_HOST" ]]; then
+            echo '::error::Unable to resolve HOST from wrangler.toml.'
+            exit 1
+          fi
+          echo "EDGE_BASE_URL=https://${EDGE_HOST}" >> "$GITHUB_ENV"
+
+      - name: Run non-mutating Stage A canary
+        env:
+          OPTIMIZER_TOKEN: ${{ secrets.EDGETUNNEL_OPTIMIZER_TOKEN }}
+          ADMIN_PASSWORD: ${{ secrets.EDGETUNNEL_ADMIN }}
+          DIAGNOSTIC_TARGETS: ${{ secrets.EDGETUNNEL_DIAGNOSTIC_TARGETS }}
+        run: node scripts/stage-a-canary.mjs
