@@ -34,6 +34,10 @@ export function parseArgs(argv = process.argv.slice(2)) {
   return { command, mode, dryRun };
 }
 
+export function logProgress(event) {
+  console.log(JSON.stringify({ type: 'optimizer_progress', ...event }));
+}
+
 export async function acquireLock(dataDir, { staleMs = LOCK_STALE_MS, now = Date.now } = {}) {
   await mkdir(dataDir, { recursive: true });
   const file = path.join(dataDir, 'optimizer.lock');
@@ -83,9 +87,13 @@ export async function runLockedCycle(config, { mode, dryRun = false, deps = {} }
   const lock = await (deps.acquireLock || acquireLock)(config.dataDir);
   if (!lock) return { status: 'skipped_locked', mode };
   try {
+    const runDeps = { ...(deps.runDeps || {}) };
+    if (typeof deps.progress === 'function' && typeof runDeps.progress !== 'function') {
+      runDeps.progress = deps.progress;
+    }
     return await (deps.runCycle || runCycle)(
       { ...config, publishEnabled: dryRun ? false : config.publishEnabled },
-      { mode, deps: deps.runDeps || {} },
+      { mode, deps: runDeps },
     );
   } finally {
     await lock.release();
@@ -114,9 +122,13 @@ async function main() {
   if (args.command === 'canary') {
     console.log(JSON.stringify(await runNasCanary(config)));
   } else if (args.command === 'daemon') {
-    await runDaemon(config);
+    await runDaemon(config, { progress: logProgress });
   } else {
-    console.log(JSON.stringify(await runLockedCycle(config, { mode: args.mode, dryRun: args.dryRun })));
+    console.log(JSON.stringify(await runLockedCycle(config, {
+      mode: args.mode,
+      dryRun: args.dryRun,
+      deps: { progress: logProgress },
+    })));
   }
 }
 
