@@ -76,6 +76,7 @@ function defaultDeps(overrides = {}) {
     publishPool,
     rollback,
     verifyProbe,
+    progress: () => {},
     now: () => new Date(),
     ...overrides,
   };
@@ -120,6 +121,7 @@ export async function runCycle(config, { mode = 'fast', deps: injected = {} } = 
     targetCount: candidateTarget,
   });
 
+  deps.progress({ event: 'measurement_start', mode, candidate_count: candidates.length, rounds: 3 });
   const rounds = new Map(candidates.map((address) => [address, []]));
   for (let round = 0; round < 3; round += 1) {
     const measured = await mapLimit(candidates, Number(config.concurrency || 12), async (address) => {
@@ -136,6 +138,7 @@ export async function runCycle(config, { mode = 'fast', deps: injected = {} } = 
       }
     });
     measured.forEach((result, index) => rounds.get(candidates[index]).push(result));
+    deps.progress({ event: 'round_complete', mode, candidate_count: candidates.length, round: round + 1, rounds: 3 });
   }
 
   const summaries = candidates.map((address) => deps.summarizeCandidate(rounds.get(address), address));
