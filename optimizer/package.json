@@ -1,0 +1,12 @@
+{
+  "name": "re-edgetunnel-optimizer",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "check": "node --check src/api.js && node --check src/candidates.js && node --check src/cli.js && node --check src/config.js && node --check src/probe.js && node --check src/run.js && node --check src/score.js && node --check src/state.js",
+    "test": "node --test test"
+  }
+}
