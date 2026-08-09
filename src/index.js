@@ -57,6 +57,9 @@ export default {
             ...parseEgressRuntimeConfig(env),
         });
 
+        // Never authenticate or execute reserved machine routes over plaintext HTTP.
+        if (url.protocol === 'http:') return Response.redirect(url.href.replace('http:', 'https:'), 301);
+
         // Machine-only routes are reserved before every tunnel/protocol dispatcher.
         if (pathLower === 'ops' || pathLower.startsWith('ops/')) {
             const authenticated = await authenticateMachineRequest(request, env);
@@ -88,8 +91,6 @@ export default {
         }
 
         // --- HTTP Handling ---
-        if (url.protocol === 'http:') return Response.redirect(url.href.replace('http:', 'https:'), 301);
-
         if (!adminPassword) return new Response('Administrator password is not configured.', { status: 503 });
 
         const contentType = request.headers.get('content-type')?.toLowerCase() || '';
