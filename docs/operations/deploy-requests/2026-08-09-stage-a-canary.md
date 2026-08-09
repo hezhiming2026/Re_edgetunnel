@@ -38,4 +38,6 @@ Deployment is acceptable only if:
 5. optimizer and diagnostic endpoints remain machine-authenticated;
 6. diagnostic observation remains non-routing and direct-only.
 
+Trigger note: this record was refreshed after PR creation so GitHub emits a pull-request synchronize event for the deployment workflow.
+
 This record intentionally contains no production hostname, account identifier, tunnel identifier, private address, or secret value.
