@@ -17,6 +17,12 @@ test('optimizer container is non-root with a read-only root filesystem and no pu
   assert.doesNotMatch(compose, /network_mode:\s*host/);
 });
 
+test('optimizer image copies runtime files to the non-root UID', async () => {
+  const dockerfile = await read('deploy/nas/optimizer.Dockerfile');
+  assert.match(dockerfile, /COPY\s+--chown=10001:10001\s+optimizer\/package\.json\s+\.\/package\.json/);
+  assert.match(dockerfile, /COPY\s+--chown=10001:10001\s+optimizer\/src\s+\.\/src/);
+});
+
 test('example environment is non-publishing and contains placeholders only', async () => {
   const env = await read('deploy/nas/optimizer.env.example');
   assert.match(env, /^PUBLISH_ENABLED=false$/m);
