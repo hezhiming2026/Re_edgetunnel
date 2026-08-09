@@ -2,3 +2,5 @@
 .dev.vars
 .dev.vars.*
 wrangler.deploy.toml
+deploy/nas/optimizer.env
+deploy/nas/optimizer-data/
