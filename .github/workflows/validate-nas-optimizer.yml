@@ -45,3 +45,8 @@ jobs:
 
       - name: Build optimizer image
         run: docker build -f deploy/nas/optimizer.Dockerfile -t re-edgetunnel-optimizer:ci .
+
+      - name: Smoke non-root runtime permissions
+        run: |
+          docker run --rm --entrypoint sh re-edgetunnel-optimizer:ci -c 'test -r /app/src/cli.js && test -r /app/src/run.js'
+          docker run --rm --entrypoint node re-edgetunnel-optimizer:ci --input-type=module -e "await import('/app/src/config.js'); await import('/app/src/run.js')"
