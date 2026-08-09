@@ -85,7 +85,13 @@ export class OptimizerCoordinator extends DurableObject {
     }
 
     getStatus() {
-        return readAuthoritativePoolStatus(this.ctx.storage);
+        const status = readAuthoritativePoolStatus(this.ctx.storage);
+        const addState = readAuthoritativeAddState(this.ctx.storage);
+        return {
+            ...status,
+            add_source: addState.source,
+            add_initialized: addState.initialized,
+        };
     }
 
     getAddState() {
