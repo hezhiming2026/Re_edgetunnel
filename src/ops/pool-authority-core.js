@@ -121,10 +121,16 @@ export function readAuthoritativeAddState(storage) {
         || current !== null
         || manualAddTxt !== undefined
         || optimizerAddTxt !== undefined;
+    const source = manualAddTxt !== undefined
+        ? 'manual'
+        : optimizerAddTxt !== undefined || current !== null
+            ? 'optimizer'
+            : 'none';
 
     return {
         initialized,
         add_txt: manualAddTxt ?? optimizerAddTxt ?? null,
+        source,
     };
 }
 
