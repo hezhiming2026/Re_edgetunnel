@@ -36,6 +36,25 @@ test('restart reloads current previous and last-good state without secrets', asy
   assert.doesNotMatch(serialized, /optimizer-token|https:\/\/secret/);
 });
 
+test('writing null optional snapshots removes stale previous and candidate files', async () => {
+  const dir = await tempDir();
+  await writeOptimizerState(dir, {
+    current: { revision: 'r2', entries: [] },
+    previous: { revision: 'r1', entries: [] },
+    lastGoodAdd: '',
+    candidates: { count: 10 },
+  });
+  await writeOptimizerState(dir, {
+    current: { revision: 'r2', entries: [] },
+    previous: null,
+    lastGoodAdd: '',
+    candidates: null,
+  });
+  const loaded = await loadState(dir);
+  assert.equal(loaded.previous, null);
+  assert.equal(loaded.candidates, null);
+});
+
 test('detailed runs are retained for 30 days and history summaries for 180 days', async () => {
   const dir = await tempDir();
   const now = new Date('2026-08-09T00:00:00Z');
