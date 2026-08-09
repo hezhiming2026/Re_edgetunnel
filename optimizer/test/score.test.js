@@ -22,15 +22,19 @@ test('eligibility requires at least 2/3 success and median TTFB <=1500ms', () =>
   assert.equal(slow.eligible, false);
 });
 
-test('scoring prefers reliability and lower latency while ties favor current entries', () => {
+test('scoring respects frozen weights and only uses current preference as a tie-breaker', () => {
   const summaries = [
     { address: '104.16.0.1', eligible: true, reliability: 1, medianTtfbMs: 100, p95TotalMs: 250, throughputBps: 300000 },
-    { address: '104.16.0.2', eligible: true, reliability: 2 / 3, medianTtfbMs: 80, p95TotalMs: 220, throughputBps: 350000 },
+    { address: '104.16.0.2', eligible: true, reliability: 2 / 3, medianTtfbMs: 140, p95TotalMs: 320, throughputBps: 250000 },
     { address: '104.16.0.3', eligible: true, reliability: 1, medianTtfbMs: 100, p95TotalMs: 250, throughputBps: 300000 },
   ];
   const scored = scoreCandidates(summaries, new Set(['104.16.0.3']));
+  const first = scored.find((x) => x.address === '104.16.0.1');
+  const second = scored.find((x) => x.address === '104.16.0.2');
+  const currentTie = scored.find((x) => x.address === '104.16.0.3');
   assert.equal(scored[0].address, '104.16.0.3');
-  assert.ok(scored.find((x) => x.address === '104.16.0.1').score > scored.find((x) => x.address === '104.16.0.2').score);
+  assert.equal(currentTie.score, first.score);
+  assert.ok(first.score > second.score);
 });
 
 test('Top-8 selection enforces max two addresses per /24', () => {
