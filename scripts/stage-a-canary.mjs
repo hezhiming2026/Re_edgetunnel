@@ -45,7 +45,19 @@ export async function runStageACanary({
     invariant(targets.size > 0, 'DIAGNOSTIC_TARGETS must contain at least one configured key');
 
     const unauth = await request(fetchImpl, normalizedBase, '/ops/optimizer/v1/status');
-    assertStatus(unauth, 401, 'unauthenticated machine route');
+    let edgeProtection;
+    if (unauth.status === 401) edgeProtection = 'worker-401';
+    else if (unauth.status === 403) edgeProtection = 'pre-worker-403';
+    else throw new Error(`unauthenticated machine route: expected HTTP 401 or edge 403, got ${unauth.status}`);
+    log(JSON.stringify({ canary: 'edge-preflight', anonymous_machine_route: edgeProtection }));
+
+    // A Cloudflare edge 403 for an anonymous cloud-runner request is acceptable only
+    // if the authenticated machine route still reaches the Worker successfully.
+    const statusResponse = await request(fetchImpl, normalizedBase, '/ops/optimizer/v1/status', {
+        headers: bearer(optimizerToken),
+    });
+    assertStatus(statusResponse, 200, 'authenticated optimizer status');
+    const status = await statusResponse.json();
 
     const adminAsMachine = await request(fetchImpl, normalizedBase, '/ops/optimizer/v1/status', {
         headers: bearer(adminPassword),
@@ -66,12 +78,6 @@ export async function runStageACanary({
     invariant(probeBody.byteLength === PROBE_BYTES, `bounded optimizer probe must be exactly ${PROBE_BYTES} bytes`);
     invariant(probe.headers.get('cache-control')?.toLowerCase().includes('no-store'), 'bounded optimizer probe must be no-store');
     invariant(probe.headers.get('x-optimizer-probe-version') === '1', 'unexpected optimizer probe version');
-
-    const statusResponse = await request(fetchImpl, normalizedBase, '/ops/optimizer/v1/status', {
-        headers: bearer(optimizerToken),
-    });
-    assertStatus(statusResponse, 200, 'authenticated optimizer status');
-    const status = await statusResponse.json();
 
     const targetResults = [];
     for (const key of targets.keys()) {
@@ -106,6 +112,7 @@ export async function runStageACanary({
 
     const summary = {
         authIsolation: 'ok',
+        edgeProtection,
         probeBytes: probeBody.byteLength,
         optimizer: {
             current: status?.current ?? null,
@@ -113,7 +120,7 @@ export async function runStageACanary({
         },
         targets: targetResults,
     };
-    log(JSON.stringify({ canary: 'stage-a', status: 'ok', target_count: targetResults.length, probe_bytes: probeBody.byteLength }));
+    log(JSON.stringify({ canary: 'stage-a', status: 'ok', edge_protection: edgeProtection, target_count: targetResults.length, probe_bytes: probeBody.byteLength }));
     return summary;
 }
 
