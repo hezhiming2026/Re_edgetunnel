@@ -10,6 +10,13 @@ import { parseConcurrentDialCount } from './core/dialer.js';
 import { parseSpeedTestDomains, parseSpeedTestMode } from './core/speedtest.js';
 import { handleGrpcRequest, handleXHttpRequest } from './core/http-tunnel.js';
 import { parseUpstreamProxy } from './protocols/upstream.js';
+import { authenticateMachineRequest, machineUnauthorized } from './ops/auth.js';
+import { directDiagnosticDial } from './ops/direct-dial-worker.js';
+import { handleEgressDiagnose } from './ops/egress-diagnostics.js';
+import { parseEgressRuntimeConfig } from './ops/egress-policy.js';
+import { handleOptimizerRequest } from './ops/optimizer-api.js';
+
+export { OptimizerCoordinator } from './ops/optimizer-coordinator.js';
 
 export default {
     async fetch(request, env, ctx) {
@@ -47,7 +54,21 @@ export default {
                 hostname: env.DNS_RESOLVER,
                 port: Number(env.DNS_RESOLVER_PORT || 53),
             } : null,
+            ...parseEgressRuntimeConfig(env),
         });
+
+        // Never authenticate or execute reserved machine routes over plaintext HTTP.
+        if (url.protocol === 'http:') return Response.redirect(url.href.replace('http:', 'https:'), 301);
+
+        // Machine-only routes are reserved before every tunnel/protocol dispatcher.
+        if (pathLower === 'ops' || pathLower.startsWith('ops/')) {
+            const authenticated = await authenticateMachineRequest(request, env);
+            if (!authenticated) return machineUnauthorized();
+            if (pathLower === 'ops/egress/v1/diagnose') {
+                return handleEgressDiagnose(request, env, createProxyConfig(), { directDial: directDiagnosticDial });
+            }
+            return handleOptimizerRequest(request, env, pathLower);
+        }
 
         // --- WS Handling ---
         if (upgradeHeader === 'websocket') {
@@ -70,8 +91,6 @@ export default {
         }
 
         // --- HTTP Handling ---
-        if (url.protocol === 'http:') return Response.redirect(url.href.replace('http:', 'https:'), 301);
-
         if (!adminPassword) return new Response('Administrator password is not configured.', { status: 503 });
 
         const contentType = request.headers.get('content-type')?.toLowerCase() || '';
