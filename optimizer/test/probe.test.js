@@ -66,8 +66,8 @@ test('probe connects to candidate IP while using configured SNI and Host', async
       observedHost = /\r\nHost: ([^\r\n]+)/i.exec(request)?.[1] || null;
       observedAuth = /\r\nAuthorization: ([^\r\n]+)/i.exec(request)?.[1] || null;
       const body = Buffer.alloc(64 * 1024, 7);
-      socket.end(`HTTP/1.1 200 OK\r\nContent-Length: ${body.length}\r\nCache-Control: no-store\r\nX-Optimizer-Probe-Version: 1\r\nConnection: close\r\n\r\n`, () => {});
-      socket.write(body);
+      const head = Buffer.from(`HTTP/1.1 200 OK\r\nContent-Length: ${body.length}\r\nCache-Control: no-store\r\nX-Optimizer-Probe-Version: 1\r\nConnection: close\r\n\r\n`);
+      socket.end(Buffer.concat([head, body]));
     });
   });
   server.listen(0, '127.0.0.1');
