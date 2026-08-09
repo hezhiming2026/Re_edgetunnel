@@ -53,6 +53,7 @@ test('Stage A canary validates auth isolation, bounded probe, and redacted diagn
         log: (line) => logs.push(String(line)),
     });
 
+    assert.equal(summary.edgeProtection, 'worker-401');
     assert.equal(summary.probeBytes, 65536);
     assert.deepEqual(summary.targets.map((item) => item.target), ['baseline', 'x']);
     assert.equal(summary.targets[0].direct.state, 'ok');
@@ -69,11 +70,50 @@ test('Stage A canary validates auth isolation, bounded probe, and redacted diagn
     assert.equal(diagnosticCalls.length, 2);
 });
 
+test('Stage A canary tolerates pre-Worker 403 on anonymous machine route when authenticated route reaches Worker', async () => {
+    const logs = [];
+    const optimizerToken = 'optimizer';
+    const adminPassword = 'admin';
+
+    const fetchImpl = async (url, init = {}) => {
+        const u = new URL(url);
+        const auth = new Headers(init.headers || {}).get('authorization');
+        if (u.pathname === '/ops/optimizer/v1/status' && !auth) return response('', { status: 403 });
+        if (u.pathname === '/ops/optimizer/v1/status' && auth === `Bearer ${optimizerToken}`) {
+            return response('{"current":null,"previous":null}', { status: 200, headers: { 'content-type': 'application/json' } });
+        }
+        if (u.pathname === '/ops/optimizer/v1/status' && auth === `Bearer ${adminPassword}`) return response('', { status: 401 });
+        if (u.pathname === '/admin') return response('', { status: 302, headers: { location: '/login' } });
+        if (u.pathname === '/ops/optimizer/v1/probe') {
+            return response(new Uint8Array(65536), { status: 200, headers: { 'cache-control': 'no-store', 'x-optimizer-probe-version': '1' } });
+        }
+        if (u.pathname === '/ops/egress/v1/diagnose') {
+            return response('{"target":"baseline","direct":{"state":"ok","elapsed_ms":8},"nas":{"state":"not_configured"}}', { status: 200 });
+        }
+        throw new Error(`unexpected request: ${u.pathname}`);
+    };
+
+    const summary = await runStageACanary({
+        baseUrl: 'https://edge.example.test',
+        optimizerToken,
+        adminPassword,
+        diagnosticTargets: 'baseline=www.example.com:443',
+        fetchImpl,
+        log: (line) => logs.push(String(line)),
+    });
+
+    assert.equal(summary.edgeProtection, 'pre-worker-403');
+    assert.equal(summary.authIsolation, 'ok');
+    assert.equal(summary.targets[0].direct.state, 'ok');
+    assert.match(logs.join('\n'), /pre-worker-403/);
+});
+
 test('Stage A canary rejects a probe that is not exactly 65536 bytes', async () => {
     const fetchImpl = async (url, init = {}) => {
         const u = new URL(url);
         const auth = new Headers(init.headers || {}).get('authorization');
         if (u.pathname === '/ops/optimizer/v1/status' && !auth) return response('', { status: 401 });
+        if (u.pathname === '/ops/optimizer/v1/status' && auth === 'Bearer optimizer') return response('{"current":null,"previous":null}', { status: 200 });
         if (u.pathname === '/ops/optimizer/v1/status' && auth === 'Bearer admin') return response('', { status: 401 });
         if (u.pathname === '/admin') return response('', { status: 302, headers: { location: '/login' } });
         if (u.pathname === '/ops/optimizer/v1/probe') return response(new Uint8Array(1024), { status: 200, headers: { 'cache-control': 'no-store', 'x-optimizer-probe-version': '1' } });
