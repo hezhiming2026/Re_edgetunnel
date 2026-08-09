@@ -34,7 +34,7 @@ jobs:
 
       - name: Test optimizer
         run: |
-          npm test -- --test-name-pattern='optimizer|candidate|probe|scor|promotion|state|CLI|NAS|deployment|ADD source|manual ADD|revision'
+          npm --prefix optimizer test
           npm --prefix optimizer run check
 
       - name: Validate Compose
