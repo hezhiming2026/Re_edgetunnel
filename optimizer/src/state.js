@@ -8,7 +8,6 @@ import {
   rename,
   rm,
   stat,
-  writeFile,
 } from 'node:fs/promises';
 import crypto from 'node:crypto';
 
@@ -39,39 +38,37 @@ async function syncDirectory(dir) {
     const handle = await open(dir, 'r');
     try { await handle.sync(); } finally { await handle.close(); }
   } catch {
-    // Some filesystems do not allow fsync on directory handles. File fsync + rename
-    // still prevents partial JSON documents, which is the primary invariant here.
+    // Directory fsync is not available on every NAS filesystem. The file itself
+    // is still fsynced before the atomic rename.
+  }
+}
+
+async function atomicReplace(file, content) {
+  const dir = path.dirname(file);
+  await mkdir(dir, { recursive: true });
+  const temp = `${file}.tmp-${process.pid}-${crypto.randomBytes(6).toString('hex')}`;
+  let handle;
+  try {
+    handle = await open(temp, 'wx', 0o600);
+    await handle.writeFile(content, 'utf8');
+    await handle.sync();
+    await handle.close();
+    handle = null;
+    await rename(temp, file);
+    await syncDirectory(dir);
+  } catch (error) {
+    if (handle) await handle.close().catch(() => {});
+    await rm(temp, { force: true }).catch(() => {});
+    throw error;
   }
 }
 
 export async function writeAtomicJson(file, value) {
-  const dir = path.dirname(file);
-  await mkdir(dir, { recursive: true });
-  const temp = `${file}.tmp-${process.pid}-${crypto.randomBytes(6).toString('hex')}`;
-  const handle = await open(temp, 'wx', 0o600);
-  try {
-    await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, 'utf8');
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-  await rename(temp, file);
-  await syncDirectory(dir);
+  await atomicReplace(file, `${JSON.stringify(value, null, 2)}\n`);
 }
 
 async function writeAtomicText(file, value) {
-  const dir = path.dirname(file);
-  await mkdir(dir, { recursive: true });
-  const temp = `${file}.tmp-${process.pid}-${crypto.randomBytes(6).toString('hex')}`;
-  const handle = await open(temp, 'wx', 0o600);
-  try {
-    await handle.writeFile(String(value ?? ''), 'utf8');
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-  await rename(temp, file);
-  await syncDirectory(dir);
+  await atomicReplace(file, String(value ?? ''));
 }
 
 function sanitizeStateObject(value) {
@@ -95,12 +92,21 @@ export async function loadState(dataDir) {
   };
 }
 
+async function writeOrRemoveJson(file, value) {
+  if (value == null) {
+    await rm(file, { force: true });
+    await syncDirectory(path.dirname(file));
+    return;
+  }
+  await writeAtomicJson(file, sanitizeStateObject(value));
+}
+
 export async function writeOptimizerState(dataDir, { current = null, previous = null, lastGoodAdd = '', candidates = null } = {}) {
   await mkdir(path.join(dataDir, 'runs'), { recursive: true });
-  if (current != null) await writeAtomicJson(path.join(dataDir, 'current.json'), sanitizeStateObject(current));
-  if (previous != null) await writeAtomicJson(path.join(dataDir, 'previous.json'), sanitizeStateObject(previous));
+  await writeOrRemoveJson(path.join(dataDir, 'current.json'), current);
+  await writeOrRemoveJson(path.join(dataDir, 'previous.json'), previous);
   await writeAtomicText(path.join(dataDir, 'last-good-add.txt'), lastGoodAdd);
-  if (candidates != null) await writeAtomicJson(path.join(dataDir, 'candidates.json'), sanitizeStateObject(candidates));
+  await writeOrRemoveJson(path.join(dataDir, 'candidates.json'), candidates);
 }
 
 export async function appendHistory(dataDir, summary) {
