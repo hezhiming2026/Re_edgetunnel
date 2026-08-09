@@ -23,13 +23,15 @@ jobs:
         uses: actions/github-script@v8
         with:
           script: |
+            const runUrl = `${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`;
             await github.rest.repos.createCommitStatus({
               owner: context.repo.owner,
               repo: context.repo.repo,
               sha: context.sha,
               state: 'pending',
               context: 'stage-a/canary',
-              description: 'Running redacted Stage A canary'
+              description: 'Running redacted Stage A canary',
+              target_url: runUrl
             });
 
       - name: Check out repository
@@ -68,6 +70,7 @@ jobs:
           script: |
             const fs = require('fs');
             const success = '${{ job.status }}' === 'success';
+            const runUrl = `${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`;
             if (fs.existsSync('/tmp/stage-a-canary.log')) {
               const lines = fs.readFileSync('/tmp/stage-a-canary.log', 'utf8').split(/\r?\n/).filter(Boolean);
               for (const line of lines) {
@@ -82,7 +85,8 @@ jobs:
                   sha: context.sha,
                   state: 'success',
                   context: `stage-a/diagnostic/${key}/${direct}`,
-                  description: 'Redacted direct-path measurement recorded'
+                  description: 'Redacted direct-path measurement recorded',
+                  target_url: runUrl
                 });
               }
             }
@@ -92,5 +96,6 @@ jobs:
               sha: context.sha,
               state: success ? 'success' : 'failure',
               context: 'stage-a/canary',
-              description: success ? 'Stage A canary passed' : 'Stage A canary failed'
+              description: success ? 'Stage A canary passed' : 'Stage A canary failed',
+              target_url: runUrl
             });
