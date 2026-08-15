@@ -33,7 +33,11 @@ test('first-publish recovery clears optimizer authority only when expected revis
   assert.equal(cleared.previous, 'r2');
   assert.equal(storage.map.has('current'), false);
   assert.equal(storage.map.has('previous'), false);
-  assert.equal(storage.map.has('add_txt'), false);
+  assert.equal(storage.map.get('add_txt'), '');
+  const state = authority.readAuthoritativeAddState(storage);
+  assert.equal(state.initialized, true);
+  assert.equal(state.source, 'optimizer');
+  assert.equal(state.add_txt, '');
   assert.equal(storage.map.get('status').mutation, 'reset_empty');
 });
 
