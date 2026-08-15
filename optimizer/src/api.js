@@ -37,11 +37,45 @@ function redact(text, config) {
   return value;
 }
 
+async function readBoundedBody(response, limit) {
+  const reader = response.body?.getReader?.();
+  if (!reader) return new Uint8Array(0);
+  const chunks = [];
+  let total = 0;
+  try {
+    while (total < limit) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = value instanceof Uint8Array ? value : new Uint8Array(value || 0);
+      const remaining = limit - total;
+      if (remaining <= 0) break;
+      const take = Math.min(remaining, chunk.byteLength);
+      if (take > 0) {
+        chunks.push(chunk.subarray(0, take));
+        total += take;
+      }
+      if (chunk.byteLength > take || total >= limit) {
+        await reader.cancel().catch(() => {});
+        break;
+      }
+    }
+  } finally {
+    try { reader.releaseLock(); } catch {}
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
+
 async function boundedError(response, config) {
   let text = '';
   try {
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    text = new TextDecoder().decode(bytes.subarray(0, MAX_ERROR_BODY));
+    const bytes = await readBoundedBody(response, MAX_ERROR_BODY);
+    text = new TextDecoder().decode(bytes);
   } catch {
     text = '';
   }
@@ -82,6 +116,14 @@ export function publishPool(config, { expectedRevision = null, entries = [] }) {
 
 export function rollback(config, { expectedRevision }) {
   return jsonRequest(config, '/ops/optimizer/v1/rollback', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ expected_current_revision: expectedRevision }),
+  });
+}
+
+export function clearPool(config, { expectedRevision }) {
+  return jsonRequest(config, '/ops/optimizer/v1/reset', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ expected_current_revision: expectedRevision }),
