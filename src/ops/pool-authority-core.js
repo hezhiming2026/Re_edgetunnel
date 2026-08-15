@@ -115,7 +115,10 @@ export function resetAuthoritativePoolToEmpty(storage, expectedCurrentRevision, 
 
         storage.kv.delete('current');
         storage.kv.delete('previous');
-        storage.kv.delete('add_txt');
+        // Keep an explicit initialized-empty optimizer marker. This prevents
+        // subscription/admin readers from resurrecting stale legacy KV data if
+        // the best-effort KV mirror deletion is degraded after a reset.
+        storage.kv.put('add_txt', '');
         storage.kv.put('status', {
             mutation: 'reset_empty',
             at: now,
@@ -129,7 +132,7 @@ export function resetAuthoritativePoolToEmpty(storage, expectedCurrentRevision, 
             checksum: null,
             previous: current,
             snapshot: null,
-            add_txt: null,
+            add_txt: '',
         };
     });
     return result;
