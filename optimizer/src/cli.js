@@ -1,5 +1,6 @@
 import path from 'node:path';
-import { open, mkdir, rm, stat } from 'node:fs/promises';
+import { open, mkdir, rm, stat, readFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { runCycle } from './run.js';
 import { getStatus, verifyProbe } from './api.js';
@@ -38,17 +39,32 @@ export function logProgress(event) {
   console.log(JSON.stringify({ type: 'optimizer_progress', ...event }));
 }
 
+async function readLockToken(file) {
+  try {
+    const parsed = JSON.parse(await readFile(file, 'utf8'));
+    return typeof parsed?.token === 'string' ? parsed.token : null;
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    return null;
+  }
+}
+
 export async function acquireLock(dataDir, { staleMs = LOCK_STALE_MS, now = Date.now } = {}) {
   await mkdir(dataDir, { recursive: true });
   const file = path.join(dataDir, 'optimizer.lock');
   const tryOpen = async () => {
+    const token = randomUUID();
     try {
       const handle = await open(file, 'wx', 0o600);
-      await handle.writeFile(`${JSON.stringify({ pid: process.pid, at: new Date(now()).toISOString() })}\n`, 'utf8');
+      await handle.writeFile(`${JSON.stringify({ pid: process.pid, at: new Date(now()).toISOString(), token })}\n`, 'utf8');
       await handle.sync();
       return {
         async release() {
-          try { await handle.close(); } finally { await rm(file, { force: true }); }
+          try {
+            await handle.close();
+          } finally {
+            if (await readLockToken(file) === token) await rm(file, { force: true });
+          }
         },
       };
     } catch (error) {
@@ -102,17 +118,35 @@ export async function runLockedCycle(config, { mode, dryRun = false, deps = {} }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+function fullCycleCompleted(result) {
+  return result && !['skipped_locked', 'cycle_error', 'remote_state_unknown'].includes(result.status);
+}
+
+async function runDaemonCycle(runFn, config, mode, deps) {
+  try {
+    const result = await runFn(config, { mode, deps });
+    console.log(JSON.stringify(result));
+    return result;
+  } catch {
+    const result = { status: 'cycle_error', mode };
+    console.error(JSON.stringify({ type: 'optimizer_cycle_error', mode, error: 'cycle_failed' }));
+    return result;
+  }
+}
+
 export async function runDaemon(config, deps = {}) {
   const sleepFn = deps.sleep || sleep;
   const now = deps.now || Date.now;
   const runFn = deps.runLockedCycle || runLockedCycle;
-  console.log(JSON.stringify(await runFn(config, { mode: 'full', deps })));
-  let lastFull = now();
+
+  const initial = await runDaemonCycle(runFn, config, 'full', deps);
+  let lastFull = fullCycleCompleted(initial) ? now() : null;
+
   while (true) {
     await sleepFn(FAST_INTERVAL_MS);
-    const mode = now() - lastFull >= FULL_INTERVAL_MS ? 'full' : 'fast';
-    console.log(JSON.stringify(await runFn(config, { mode, deps })));
-    if (mode === 'full') lastFull = now();
+    const mode = lastFull === null || now() - lastFull >= FULL_INTERVAL_MS ? 'full' : 'fast';
+    const result = await runDaemonCycle(runFn, config, mode, deps);
+    if (mode === 'full' && fullCycleCompleted(result)) lastFull = now();
   }
 }
 
