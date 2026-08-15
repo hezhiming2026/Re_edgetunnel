@@ -2,7 +2,7 @@ import { parseCidrs, buildCandidateSet } from './candidates.js';
 import { probeCandidate } from './probe.js';
 import { summarizeCandidate, scoreCandidates, selectPool, shouldPromote } from './score.js';
 import { loadState, writeOptimizerState, appendHistory, saveRun, pruneRuns } from './state.js';
-import { getStatus, publishPool, rollback, verifyProbe, RevisionConflictError } from './api.js';
+import { getStatus, publishPool, rollback, clearPool, verifyProbe, RevisionConflictError } from './api.js';
 
 function iso(now) {
   return (now instanceof Date ? now : new Date(now)).toISOString();
@@ -75,6 +75,7 @@ function defaultDeps(overrides = {}) {
     getStatus,
     publishPool,
     rollback,
+    clearPool,
     verifyProbe,
     progress: () => {},
     now: () => new Date(),
@@ -220,9 +221,25 @@ export async function runCycle(config, { mode = 'fast', deps: injected = {} } = 
     return result;
   } catch (verificationError) {
     if (!published.previous) {
-      const result = { status: 'verification_failed_no_rollback', mode, revision: published.revision };
-      await persist(deps, config, { ...detailBase, result, verification_error: 'post_publish_verification_failed' }, statusSummary({ mode, at: startedAt, candidates, scored, selected, decision, status: result.status }));
-      return result;
+      try {
+        await deps.clearPool(config, { expectedRevision: published.revision });
+        await deps.writeOptimizerState(config.dataDir, {
+          current: null,
+          previous: null,
+          lastGoodAdd: state.lastGoodAdd,
+          candidates: { last_mode: mode, count: candidates.length, at: startedAt },
+        });
+        const result = { status: 'cleared_failed_first_publish', mode, revision: published.revision };
+        await persist(deps, config, { ...detailBase, result, verification_error: 'post_publish_verification_failed' }, statusSummary({ mode, at: startedAt, candidates, scored, selected, decision, status: result.status }));
+        return result;
+      } catch (clearError) {
+        if (clearError instanceof RevisionConflictError || clearError?.code === 'REVISION_CONFLICT') {
+          const result = { status: 'clear_conflict', mode, revision: published.revision };
+          await persist(deps, config, { ...detailBase, result }, statusSummary({ mode, at: startedAt, candidates, scored, selected, decision, status: result.status }));
+          return result;
+        }
+        throw clearError;
+      }
     }
     try {
       const rolled = await deps.rollback(config, { expectedRevision: published.revision });
