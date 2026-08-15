@@ -2,6 +2,7 @@ import { DurableObject } from 'cloudflare:workers';
 import {
     publishAuthoritativePool,
     rollbackAuthoritativePool,
+    resetAuthoritativePoolToEmpty,
     readAuthoritativeAddState,
     readAuthoritativeAddTxt,
     readAuthoritativePoolStatus,
@@ -32,12 +33,17 @@ export class OptimizerCoordinator extends DurableObject {
         if (!result?.ok || !this.env?.KV) return 'unavailable';
         try {
             const status = readAuthoritativePoolStatus(this.ctx.storage);
-            await this.env.KV.put(`optimizer:pool:${result.snapshot.revision}`, JSON.stringify(result.snapshot));
+            if (result.snapshot?.revision) {
+                await this.env.KV.put(`optimizer:pool:${result.snapshot.revision}`, JSON.stringify(result.snapshot));
+            }
             if (status.previous) await this.env.KV.put('optimizer:previous', status.previous);
-            await this.env.KV.put('optimizer:current', status.current);
+            else if (typeof this.env.KV.delete === 'function') await this.env.KV.delete('optimizer:previous');
+            if (status.current) await this.env.KV.put('optimizer:current', status.current);
+            else if (typeof this.env.KV.delete === 'function') await this.env.KV.delete('optimizer:current');
             const effectiveAddTxt = readAuthoritativeAddTxt(this.ctx.storage);
             if (effectiveAddTxt) await this.env.KV.put('ADD.txt', effectiveAddTxt);
             else if (typeof this.env.KV.delete === 'function') await this.env.KV.delete('ADD.txt');
+            else await this.env.KV.put('ADD.txt', '');
             await this.env.KV.put('optimizer:status', JSON.stringify(status.status));
             return 'ok';
         } catch (error) {
@@ -73,6 +79,19 @@ export class OptimizerCoordinator extends DurableObject {
             ok: true,
             revision: result.revision,
             checksum: result.checksum,
+            previous: result.previous,
+            mirror,
+        };
+    }
+
+    async resetPoolToEmpty(expectedCurrentRevision) {
+        const result = resetAuthoritativePoolToEmpty(this.ctx.storage, expectedCurrentRevision);
+        if (!result.ok) return result;
+        const mirror = await this.mirror(result);
+        return {
+            ok: true,
+            revision: null,
+            checksum: null,
             previous: result.previous,
             mirror,
         };
