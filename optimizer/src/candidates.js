@@ -89,7 +89,6 @@ export function sampleIpv4Cidrs(cidrs, count, rng = Math.random) {
     }
   }
 
-  // Deterministic bounded fallback for tiny ranges or adversarial RNGs.
   if (result.length < wanted) {
     for (const cidr of cidrs) {
       if (result.length >= wanted) break;
@@ -108,7 +107,7 @@ export function sampleIpv4Cidrs(cidrs, count, rng = Math.random) {
 
 export function buildCandidateSet({ current = [], seeds = [], cidrs, targetCount, rng = Math.random }) {
   if (!Array.isArray(cidrs) || cidrs.length === 0) throw new Error('CIDRs are required');
-  const target = Math.max(0, Math.floor(Number(targetCount) || 0));
+  const additionalTarget = Math.max(0, Math.floor(Number(targetCount) || 0));
   const result = [];
   const seen = new Set();
   const retain = (address) => {
@@ -120,12 +119,13 @@ export function buildCandidateSet({ current = [], seeds = [], cidrs, targetCount
 
   current.forEach(retain);
   seeds.forEach(retain);
-  if (result.length >= target) return result.slice(0, target);
+  const desiredTotal = result.length + additionalTarget;
+  if (additionalTarget === 0) return result;
 
-  const sampled = sampleIpv4Cidrs(cidrs, Math.max(target * 2, target + 16), rng);
+  const sampled = sampleIpv4Cidrs(cidrs, Math.max(additionalTarget * 3, desiredTotal * 2, additionalTarget + 16), rng);
   for (const address of sampled) {
     retain(address);
-    if (result.length >= target) break;
+    if (result.length >= desiredTotal) break;
   }
   return result;
 }
