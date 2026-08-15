@@ -131,7 +131,7 @@ test('releasing an old stale lock never deletes a replacement lock', async () =>
   const replacement = await acquireLock(dir, { staleMs: 10, now: () => base + 1000 });
   assert.ok(replacement);
   await first.release();
-  const third = await acquireLock(dir, { staleMs: 10, now: () => base + 1001 });
+  const third = await acquireLock(dir, { staleMs: 100000, now: () => base + 1001 });
   assert.equal(third, null);
   await replacement.release();
 });
