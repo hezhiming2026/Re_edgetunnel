@@ -95,6 +95,46 @@ export function rollbackAuthoritativePool(storage, expectedCurrentRevision, now 
     return result;
 }
 
+export function resetAuthoritativePoolToEmpty(storage, expectedCurrentRevision, now = new Date().toISOString()) {
+    let result;
+    storage.transactionSync(() => {
+        const current = storage.kv.get('current') ?? null;
+        if (typeof expectedCurrentRevision !== 'string' || !expectedCurrentRevision) {
+            result = { ok: false, status: 400, error: 'expected_current_revision is required' };
+            return;
+        }
+        if (current !== expectedCurrentRevision) {
+            result = { ok: false, status: 409, error: 'Current optimizer revision changed' };
+            return;
+        }
+        const previous = storage.kv.get('previous') ?? null;
+        if (previous) {
+            result = { ok: false, status: 409, error: 'Previous optimizer revision exists; use rollback' };
+            return;
+        }
+
+        storage.kv.delete('current');
+        storage.kv.delete('previous');
+        storage.kv.delete('add_txt');
+        storage.kv.put('status', {
+            mutation: 'reset_empty',
+            at: now,
+            revision: null,
+            previous: current,
+            checksum: null,
+        });
+        result = {
+            ok: true,
+            revision: null,
+            checksum: null,
+            previous: current,
+            snapshot: null,
+            add_txt: null,
+        };
+    });
+    return result;
+}
+
 export function setManualAuthoritativeAddTxt(storage, value) {
     const text = typeof value === 'string' ? value : '';
     storage.transactionSync(() => {
