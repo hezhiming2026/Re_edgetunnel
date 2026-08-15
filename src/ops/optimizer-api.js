@@ -76,8 +76,8 @@ function validateExpectedRevision(body) {
 function coordinatorResultResponse(result) {
     if (!result?.ok) return jsonResponse({ error: result?.error || 'Optimizer mutation failed' }, result?.status || 500);
     return jsonResponse({
-        revision: result.revision,
-        checksum: result.checksum,
+        revision: result.revision ?? null,
+        checksum: result.checksum ?? null,
         previous: result.previous ?? null,
         mirror: result.mirror || 'unknown',
     });
@@ -124,6 +124,16 @@ export async function handleOptimizerRequest(request, env, pathLower) {
                 throw new PoolStoreError('expected_current_revision is required', 400);
             }
             return coordinatorResultResponse(await coordinator.rollbackPool(body.expected_current_revision));
+        }
+
+        if (pathLower === 'ops/optimizer/v1/reset') {
+            if (request.method !== 'POST') return jsonResponse({ error: 'Method Not Allowed' }, 405);
+            const body = await readBoundedJson(request);
+            validateExpectedRevision(body);
+            if (typeof body.expected_current_revision !== 'string' || !body.expected_current_revision) {
+                throw new PoolStoreError('expected_current_revision is required', 400);
+            }
+            return coordinatorResultResponse(await coordinator.resetPoolToEmpty(body.expected_current_revision));
         }
 
         return jsonResponse({ error: 'Not Found' }, 404);
