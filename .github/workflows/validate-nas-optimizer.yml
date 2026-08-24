@@ -1,0 +1,52 @@
+name: Validate NAS Optimizer
+
+on:
+  pull_request:
+    paths:
+      - 'optimizer/**'
+      - 'deploy/nas/**'
+      - 'docs/operations/nas-optimizer.md'
+      - 'package.json'
+      - '.github/workflows/validate-nas-optimizer.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'optimizer/**'
+      - 'deploy/nas/**'
+      - 'docs/operations/nas-optimizer.md'
+      - 'package.json'
+      - '.github/workflows/validate-nas-optimizer.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  validate-nas-optimizer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Test optimizer
+        run: |
+          npm --prefix optimizer test
+          npm --prefix optimizer run check
+
+      - name: Validate Compose
+        run: |
+          cp deploy/nas/optimizer.env.example deploy/nas/optimizer.env
+          mkdir -p deploy/nas/optimizer-data
+          docker compose -f deploy/nas/docker-compose.optimizer.yml config >/tmp/optimizer-compose.yml
+
+      - name: Build optimizer image
+        run: docker build -f deploy/nas/optimizer.Dockerfile -t re-edgetunnel-optimizer:ci .
+
+      - name: Smoke non-root runtime permissions
+        run: |
+          docker run --rm --entrypoint sh re-edgetunnel-optimizer:ci -c 'test -r /app/src/cli.js && test -r /app/src/run.js'
+          docker run --rm --entrypoint node re-edgetunnel-optimizer:ci --input-type=module -e "await import('/app/src/config.js'); await import('/app/src/run.js')"

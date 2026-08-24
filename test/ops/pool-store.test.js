@@ -124,6 +124,25 @@ test('manual ADD override takes precedence over optimizer pool', () => {
     assert.equal(readAuthoritativeAddTxt(storage), 'manual.example.com:443#manual\n');
 });
 
+test('effective ADD state exposes source without exposing content through status metadata', () => {
+    const manual = new MemorySyncStorage({
+        add_txt: '104.16.1.1:443#optimizer\n',
+        manual_add_txt: 'manual.example.com:443#manual\n',
+        manual_add_initialized: true,
+        current: 'r1',
+    });
+    const optimizer = new MemorySyncStorage({
+        add_txt: '104.16.1.1:443#optimizer\n',
+        manual_add_initialized: true,
+        current: 'r1',
+    });
+    const none = new MemorySyncStorage();
+
+    assert.equal(poolAuthority.readAuthoritativeAddState(manual).source, 'manual');
+    assert.equal(poolAuthority.readAuthoritativeAddState(optimizer).source, 'optimizer');
+    assert.equal(poolAuthority.readAuthoritativeAddState(none).source, 'none');
+});
+
 test('first publish preserves a pre-DO legacy manual ADD override', async () => {
     const storage = new MemorySyncStorage();
     const firstRequest = await requestFor('104.16.1.1', 'optimizer', null, '2026-08-08T00:00:00.000Z');

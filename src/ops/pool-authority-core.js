@@ -95,6 +95,49 @@ export function rollbackAuthoritativePool(storage, expectedCurrentRevision, now 
     return result;
 }
 
+export function resetAuthoritativePoolToEmpty(storage, expectedCurrentRevision, now = new Date().toISOString()) {
+    let result;
+    storage.transactionSync(() => {
+        const current = storage.kv.get('current') ?? null;
+        if (typeof expectedCurrentRevision !== 'string' || !expectedCurrentRevision) {
+            result = { ok: false, status: 400, error: 'expected_current_revision is required' };
+            return;
+        }
+        if (current !== expectedCurrentRevision) {
+            result = { ok: false, status: 409, error: 'Current optimizer revision changed' };
+            return;
+        }
+        const previous = storage.kv.get('previous') ?? null;
+        if (previous) {
+            result = { ok: false, status: 409, error: 'Previous optimizer revision exists; use rollback' };
+            return;
+        }
+
+        storage.kv.delete('current');
+        storage.kv.delete('previous');
+        // Keep an explicit initialized-empty optimizer marker. This prevents
+        // subscription/admin readers from resurrecting stale legacy KV data if
+        // the best-effort KV mirror deletion is degraded after a reset.
+        storage.kv.put('add_txt', '');
+        storage.kv.put('status', {
+            mutation: 'reset_empty',
+            at: now,
+            revision: null,
+            previous: current,
+            checksum: null,
+        });
+        result = {
+            ok: true,
+            revision: null,
+            checksum: null,
+            previous: current,
+            snapshot: null,
+            add_txt: '',
+        };
+    });
+    return result;
+}
+
 export function setManualAuthoritativeAddTxt(storage, value) {
     const text = typeof value === 'string' ? value : '';
     storage.transactionSync(() => {
@@ -121,10 +164,16 @@ export function readAuthoritativeAddState(storage) {
         || current !== null
         || manualAddTxt !== undefined
         || optimizerAddTxt !== undefined;
+    const source = manualAddTxt !== undefined
+        ? 'manual'
+        : optimizerAddTxt !== undefined || current !== null
+            ? 'optimizer'
+            : 'none';
 
     return {
         initialized,
         add_txt: manualAddTxt ?? optimizerAddTxt ?? null,
+        source,
     };
 }
 
