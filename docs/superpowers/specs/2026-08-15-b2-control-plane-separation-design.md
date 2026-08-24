@@ -9,56 +9,53 @@ Scope: design only; no production routing changes
 
 The current Worker serves tunnel traffic, subscription delivery, browser administration, and machine optimizer operations on one hostname. Tunnel compatibility benefits from a permissive Cloudflare edge posture, while admin and machine-control endpoints benefit from a strict authentication perimeter. Keeping them on the same hostname forces one edge policy to serve conflicting security requirements.
 
-This design separates those responsibilities into independent planes and removes credential fallback relationships that allow one secret to inherit another secret's authority.
+This design separates those responsibilities into independent host roles, keeps the existing ingress optimizer measurement semantics intact, and removes credential fallback relationships that allow one secret to inherit another secret's authority.
 
-Reusable documentation and tests MUST use placeholders. Operator-specific domains, account IDs, tokens, tunnel IDs, and NAS addresses are not part of the reusable contract.
+Reusable documentation and tests MUST use placeholders. Operator-specific domains, account IDs, tokens, tunnel IDs, NAS addresses, and optimizer seed IPs are not part of the reusable contract.
 
 ## 2. Goals
 
 1. Keep tunnel traffic on explicitly registered data-plane hostnames.
 2. Keep one canonical data-plane hostname for subscription generation while allowing additional disaster-recovery data-plane hostnames.
-3. Move browser administration to a dedicated admin hostname protected by Cloudflare Access and Worker-side admin authentication.
-4. Move NAS optimizer and diagnostics to a dedicated ops hostname protected by Cloudflare Access service authentication and the existing machine token.
-5. Make ADMIN, UUID, subscription credential, optimizer credential, and Cloudflare API credentials independent and independently rotatable.
-6. Remove legacy high-value secret storage and query-string credential handling that no longer serves the B2 architecture.
-7. Migrate without breaking existing subscription or tunnel clients.
-8. Make host-to-route authorization explicit, default-deny, and testable before DNS/Cloudflare changes are performed.
-9. Support a long-lived `workers.dev` disaster-recovery data-plane endpoint without making unrecognized Worker hostnames implicitly trusted.
+3. Keep browser administration on a dedicated admin hostname protected by Cloudflare Access and Worker-side admin authentication.
+4. Keep machine mutation/diagnostic APIs on a dedicated ops hostname protected by Cloudflare Access Service Auth and `OPTIMIZER_TOKEN`.
+5. Preserve Stage B ingress measurement semantics: candidate IPs are still probed with the canonical data-plane hostname as TLS SNI and HTTP Host.
+6. Make ADMIN, UUID, subscription credential, optimizer credential, and Cloudflare API credentials independent and independently rotatable.
+7. Remove legacy high-value secret storage and query-string credential handling that no longer serves the B2 architecture.
+8. Migrate without breaking existing subscription or tunnel clients.
+9. Make host-to-route authorization explicit, pairwise-disjoint, default-deny, and testable.
+10. Support a long-lived `workers.dev` disaster-recovery data-plane endpoint without implicitly trusting preview or extra Worker hostnames.
 
 ## 3. Non-goals
 
 - Stage C private NAS egress or selective fallback.
-- Changing Stage B ingress scoring.
+- Changing Stage B ingress scoring or current seven-day fixed-seed experiment parameters.
 - Kubernetes or microservice decomposition.
 - Replacing Durable Object authority.
 - Making the data plane dependent on interactive Cloudflare Access.
-- Switching production traffic to `workers.dev` during the current NAS fixed-seed measurement window.
+- Switching production traffic to `workers.dev` during the current fixed-seed measurement window.
 
 ## 4. Terminology
 
 ### Data plane
 
-The request path that carries user proxy traffic. It should do as little policy/control work as possible and must remain compatible with tunnel clients.
+The request path that carries user proxy traffic and the bounded ingress measurement endpoint whose Host/SNI must match real client traffic.
 
 ### Control plane
 
-Endpoints that change or inspect system configuration. In this design it is split into a human admin plane and a machine ops plane.
+Endpoints that inspect or mutate system configuration. It is split into a human admin plane and a machine ops plane.
 
 ### Host role allowlist
 
-A configuration mapping from explicitly trusted hostnames to roles. A hostname that is not explicitly registered has no role and MUST fail closed before route dispatch.
+A configuration mapping from explicitly trusted hostnames to exactly one role. A hostname not explicitly registered has no role and fails closed before route dispatch.
 
 ### Canonical edge host
 
-The single hostname emitted into subscription-generated tunnel nodes. It is independent from the set of all hostnames that are allowed to carry data-plane traffic.
+The single hostname emitted into subscription-generated tunnel nodes and used as TLS SNI / HTTP Host when the NAS measures candidate Cloudflare ingress IPs.
 
-### Defense in depth
+### Disaster-recovery data host
 
-Multiple independent security checks protect the same sensitive action. A failure or leak in one layer is not sufficient to authorize the request.
-
-### Credential blast radius
-
-The set of capabilities exposed if one credential is compromised. The design minimizes blast radius by preventing credential fallback between roles.
+An additional registered data-plane hostname, including the production `workers.dev` hostname, that can carry tunnel traffic but gains no admin/ops authority.
 
 ## 5. Target architecture
 
@@ -71,7 +68,7 @@ Internet / clients
    data plane                data plane            admin plane           ops plane
         |                       |                    |                    |
  tunnel protocols        tunnel protocols      Cloudflare Access     Cloudflare Access
- WS/gRPC/XHTTP           WS/gRPC/XHTTP         human Allow policy     Service Auth policy
+ bounded probe           bounded probe         human Allow policy     Service Auth policy
         |                       |                    |                    |
  Worker tunnel auth      Worker tunnel auth     Worker ADMIN session   OPTIMIZER_TOKEN
         |                       |                    |                    |
@@ -82,20 +79,20 @@ Internet / clients
                                 KV mirror only
 ```
 
-One Worker deployment MAY serve all roles initially. Separation is primarily a hostname + route authorization boundary, not a requirement to create separate Worker services.
-
-Cloudflare currently supports multiple Custom Domains per Worker and a `workers.dev` route for the same Worker. `workers.dev` is an official long-lived routing option but Cloudflare recommends Custom Domains or Routes for production. This project therefore treats `workers.dev` as an always-supported disaster-recovery data-plane endpoint, while retaining a Custom Domain as the default primary/canonical endpoint unless the operator explicitly changes it.
+One Worker deployment MAY serve all roles. Separation is a hostname + route authorization boundary, not a requirement to create separate Worker services.
 
 ## 6. Host configuration contract
 
-The implementation MUST separate two concepts:
+The implementation MUST separate:
 
 ```text
-DATA_PLANE_HOSTS     = all explicitly trusted hostnames allowed to carry tunnel traffic
-CANONICAL_EDGE_HOST  = the one hostname emitted into generated subscriptions
+DATA_PLANE_HOSTS     = all trusted hostnames allowed to carry tunnel/probe traffic
+CANONICAL_EDGE_HOST  = the one data-plane hostname emitted into subscriptions and used for ingress probe Host/SNI
+ADMIN_HOSTS          = trusted admin-only hostnames
+OPS_HOSTS            = trusted machine-control-only hostnames
 ```
 
-Example reusable configuration shape:
+Example reusable shape:
 
 ```text
 DATA_PLANE_HOSTS=${EDGE_HOSTNAME},${WORKERS_DEV_HOSTNAME}
@@ -104,323 +101,353 @@ ADMIN_HOSTS=${ADMIN_HOSTNAME}
 OPS_HOSTS=${OPS_HOSTNAME}
 ```
 
-`CANONICAL_EDGE_HOST` MUST be a member of `DATA_PLANE_HOSTS`.
+### 6.1 Pairwise-disjoint roles
 
-The operator may later switch:
+`DATA_PLANE_HOSTS`, `ADMIN_HOSTS`, and `OPS_HOSTS` MUST be pairwise disjoint.
+
+Configuration validation MUST fail closed if any normalized hostname appears in more than one role set.
+
+Examples that MUST be rejected:
+
+```text
+DATA_PLANE_HOSTS=edge.example,worker.account.workers.dev
+ADMIN_HOSTS=worker.account.workers.dev
+```
+
+or:
+
+```text
+ADMIN_HOSTS=control.example
+OPS_HOSTS=control.example
+```
+
+`CANONICAL_EDGE_HOST` MUST be a member of `DATA_PLANE_HOSTS` and therefore MUST NOT be a member of `ADMIN_HOSTS` or `OPS_HOSTS`.
+
+Hostname normalization must be deterministic before overlap checks (lowercase, no port, no trailing dot unless the implementation contract deliberately preserves one canonical form).
+
+### 6.2 Canonical-host switching
+
+The operator may later set:
 
 ```text
 CANONICAL_EDGE_HOST=${WORKERS_DEV_HOSTNAME}
 ```
 
-without changing UUID/tunnel credentials, provided that the `workers.dev` route is enabled and included in `DATA_PLANE_HOSTS`.
+without rotating UUID/tunnel credentials, provided the exact production `workers.dev` hostname is enabled and registered in `DATA_PLANE_HOSTS`.
 
 Changing the canonical host is a client-routing migration, not an authentication migration.
 
 ## 7. Host-to-route contract
 
-The Worker MUST classify the request hostname before dispatching any sensitive or tunnel route.
+The Worker MUST classify the request hostname before route dispatch.
 
-### Any hostname in `DATA_PLANE_HOSTS`
-
-Allowed:
-
-- tunnel WebSocket traffic
-- gRPC tunnel traffic
-- XHTTP tunnel traffic
-- canonical subscription endpoint during and after migration
-- benign masquerade/root response
-
-Denied with fail-closed response:
-
-- `/admin` and `/admin/*`
-- `/login`, `/logout`
-- `/ops` and `/ops/*`
-- any future control-plane mutation route
-
-### Any hostname in `ADMIN_HOSTS`
+### 7.1 Any hostname in `DATA_PLANE_HOSTS`
 
 Allowed:
 
-- `/login`
-- `/logout`
-- `/admin` and `/admin/*`
-- optional `/sub` helper only if it redirects to the canonical subscription URL; it MUST NOT render tunnel nodes using the admin request Host
+- tunnel WebSocket traffic;
+- gRPC tunnel traffic;
+- XHTTP tunnel traffic;
+- canonical subscription endpoint;
+- benign masquerade/root response;
+- exactly one bounded, read-only ingress measurement endpoint described in section 8.
 
 Denied:
 
-- WebSocket tunnel dispatcher
-- gRPC/XHTTP tunnel dispatcher
-- `/ops` and `/ops/*`
+- `/admin` and `/admin/*`;
+- `/login`, `/logout`;
+- all machine mutation/status/diagnostic APIs on `/ops/*`, except that the legacy probe path may be temporarily mapped to the bounded read-only measurement handler during migration if section 8's constraints are preserved;
+- future control-plane mutation routes.
 
-### Any hostname in `OPS_HOSTS`
+### 7.2 Any hostname in `ADMIN_HOSTS`
 
 Allowed:
 
-- `/ops/optimizer/v1/*`
-- `/ops/egress/v1/*`
-- future narrowly scoped machine endpoints
+- `/login`;
+- `/logout`;
+- `/admin` and `/admin/*`;
+- optional `/sub` helper only as redirect to the canonical subscription URL.
 
 Denied:
 
-- browser admin routes
-- subscription routes
-- all tunnel dispatchers
-- generic masquerade behavior for unknown paths; unknown ops-host paths return 404
+- all tunnel dispatchers;
+- all `/ops/*` routes;
+- ingress measurement endpoint.
 
-### Unknown / unregistered hostname
+### 7.3 Any hostname in `OPS_HOSTS`
 
-Any hostname that does not belong to `DATA_PLANE_HOSTS`, `ADMIN_HOSTS`, or `OPS_HOSTS` MUST be rejected before route dispatch with a non-sensitive 404 or 403 response.
+Allowed:
 
-This applies even when the request reaches the same Worker through:
+- `/ops/optimizer/v1/*` machine-control/status operations;
+- `/ops/egress/v1/*` diagnostics;
+- future narrowly scoped machine endpoints.
 
-- an accidentally added Custom Domain;
-- a stale route;
-- an unexpected preview hostname;
-- a renamed or extra `workers.dev` hostname;
-- any future routing surface not explicitly registered in the role allowlist.
+Denied:
 
-This is intentionally default-deny. Supporting a new hostname requires adding it to an explicit role allowlist; it does not require changing the route implementation.
+- browser admin routes;
+- subscription rendering;
+- all tunnel dispatchers;
+- ingress measurement scoring endpoint for candidate-IP latency/eligibility, because measuring the Access-protected ops hostname would not represent client data-plane routing.
 
-The host contract MUST be enforced inside the Worker even if Cloudflare Access is misconfigured or temporarily removed.
+### 7.4 Unknown / unregistered hostname
 
-## 8. `workers.dev` disaster-recovery policy
+Any hostname outside all three role sets MUST be rejected before route dispatch with non-sensitive 404 or 403 behavior.
 
-The `workers.dev` hostname is a first-class supported disaster-recovery data-plane route.
+This includes stale routes, preview hostnames, accidentally added Custom Domains, renamed/extra `workers.dev` names, and any future routing surface not deliberately assigned a role.
+
+## 8. Preserve Stage B ingress measurement semantics
+
+The NAS optimizer exists to measure:
+
+```text
+NAS -> candidate Cloudflare IP:443
+TLS SNI = CANONICAL_EDGE_HOST
+HTTP Host = CANONICAL_EDGE_HOST
+fixed Worker probe response
+```
+
+Moving that measurement to `OPS_HOSTNAME` would measure a different hostname and potentially a different Access/WAF edge policy. That is forbidden because changing Stage B measurement semantics is a non-goal.
+
+### 8.1 Bounded data-plane measurement endpoint
+
+The design therefore reserves one exact read-only measurement route on data-plane hosts, for example:
+
+```text
+GET /probe/optimizer/v1
+```
+
+Implementation MAY retain the existing exact legacy path `GET /ops/optimizer/v1/probe` during migration, but only if it is dispatched as this measurement exception rather than as general `/ops/*` authority. The long-term preferred path is outside `/ops/*` so the control-plane boundary remains obvious.
+
+The measurement handler MUST:
+
+- accept GET only;
+- require the existing machine bearer token or an equivalent dedicated probe credential;
+- perform no KV or Durable Object mutation;
+- perform no outbound fetch/dial;
+- return the deterministic fixed 65,536-byte probe contract;
+- set `Cache-Control: no-store`;
+- expose no control-plane state or secrets;
+- be callable through each registered data-plane hostname;
+- be tested using candidate IP + `CANONICAL_EDGE_HOST` SNI/Host, exactly matching Stage B intent.
+
+Machine mutation/status calls continue to use `OPS_HOSTS`; only the bounded probe remains on the data plane.
+
+### 8.2 Canonical-host migration and measurements
+
+If `CANONICAL_EDGE_HOST` later switches from a Custom Domain to `workers.dev`, that begins a new measurement baseline. The NAS probe Host/SNI must switch with it only after the current controlled measurement window is complete.
+
+## 9. `workers.dev` disaster-recovery policy
+
+The production `workers.dev` hostname is a first-class long-lived data-plane DR endpoint.
 
 Policy:
 
-1. The implementation MUST support enabling `workers.dev` and adding its exact production hostname to `DATA_PLANE_HOSTS`.
-2. The production `workers.dev` hostname MAY remain enabled continuously as a disaster-recovery endpoint.
-3. It MUST NOT implicitly gain admin or ops privileges merely because it belongs to the Worker deployment.
-4. Preview URLs remain untrusted unless separately and explicitly added to a role; default is deny.
-5. The current default recommendation is:
+1. It may remain enabled continuously.
+2. Its exact hostname must be explicitly present in `DATA_PLANE_HOSTS`.
+3. It never implicitly gains admin or ops authority.
+4. Preview URLs remain untrusted by default.
+5. Default recommendation remains:
 
 ```text
 primary/canonical = operator Custom Domain
 disaster recovery = production workers.dev hostname
 ```
 
-6. The operator MAY later choose `workers.dev` as `CANONICAL_EDGE_HOST` if operational convenience outweighs the benefit of a portable custom domain.
-7. Such a switch requires an explicit migration check because the Worker name/account subdomain becomes part of the client endpoint.
-8. Production switching between Custom Domain and `workers.dev` MUST NOT occur during a controlled optimizer measurement/calibration window unless intentionally starting a new experiment baseline.
+6. The operator may later choose `workers.dev` as `CANONICAL_EDGE_HOST` after a separate migration gate.
+7. Such a switch does not rotate UUID.
+8. Do not switch canonical host during the current fixed-seed experiment.
 
-Rationale: keeping `workers.dev` available removes registrar-expiry dependency, while retaining a Custom Domain preserves portability, a stable operator-controlled name, and Cloudflare's currently recommended production routing model.
+## 10. Subscription hostname and credential contract
 
-## 9. Subscription hostname contract
+### 10.1 Canonical subscription output
 
-Subscription authorization and subscription endpoint hosting are separate from the hostname written into generated nodes.
-
-All generated VLESS/Trojan/SS or other tunnel node addresses MUST use `CANONICAL_EDGE_HOST` for the endpoint Host/SNI unless an individual protocol contract explicitly requires otherwise.
+All generated VLESS/Trojan/SS or other tunnel nodes MUST use `CANONICAL_EDGE_HOST` for endpoint Host/SNI.
 
 The generator MUST NOT derive the tunnel hostname from `request.url.hostname`.
 
-Therefore:
+An admin-plane `/sub` helper, if retained, is redirect-only to the canonical data-plane subscription URL.
 
-```text
-GET https://${ADMIN_HOSTNAME}/sub
-```
+### 10.2 Independent `SUB_TOKEN`
 
-if retained as a compatibility helper, MUST either:
-
-1. redirect to the canonical subscription URL on `CANONICAL_EDGE_HOST`; or
-2. render a response whose tunnel nodes still use `CANONICAL_EDGE_HOST`.
-
-Preferred implementation is redirect-only on the admin plane so there is a single canonical subscription rendering path.
-
-When the operator changes `CANONICAL_EDGE_HOST`, refreshing the subscription is sufficient to move clients to the new endpoint without rotating UUID or other tunnel credentials.
-
-## 10. Authentication layers
-
-### 10.1 Data plane
-
-Tunnel authentication remains protocol credential based. `UUID` is a tunnel credential only.
-
-`UUID` MUST NOT be used as:
-
-- admin password fallback
-- subscription token seed after migration
-- optimizer token fallback
-
-### 10.2 Admin plane
-
-Layer 1: Cloudflare Access human policy.
-
-Layer 2: Worker-side `ADMIN` login/session.
-
-`ADMIN` is required for admin functionality and has no fallback to `PASSWORD`, `TOKEN`, `KEY`, `UUID`, or any other credential.
-
-The existing secure cookie requirements remain minimum requirements:
-
-- Secure
-- HttpOnly
-- SameSite=Strict
-- bounded TTL
-
-State-changing admin requests retain same-origin/CSRF checks.
-
-### 10.3 Ops plane
-
-Layer 1: Cloudflare Access Service Auth using a dedicated NAS service token.
-
-Layer 2: Worker `Authorization: Bearer <OPTIMIZER_TOKEN>` machine authentication.
-
-The service-token credential and `OPTIMIZER_TOKEN` MUST be different secrets and independently revocable.
-
-The NAS must not receive a Cloudflare account API token merely to call ops APIs.
-
-## 11. Subscription credential redesign
-
-Current subscription authorization is derived from tunnel identity. This couples two roles and makes independent revocation difficult.
-
-Introduce an independent `SUB_TOKEN` secret or a keyed HMAC scheme rooted in a dedicated `SUB_SECRET`.
-
-Preferred initial implementation: random `SUB_TOKEN` secret because the deployment is single-operator and does not need per-user token derivation complexity.
+Introduce an independent random `SUB_TOKEN` (preferred for this single-operator deployment) or a dedicated HMAC secret.
 
 Requirements:
 
-- minimum 32 random bytes before encoding
-- constant-time comparison after hashing or equivalent bounded comparison
-- no query token in logs
-- independently rotatable without changing `UUID`
-- migration window where legacy subscription token can be accepted read-only if explicitly enabled
-- legacy acceptance disabled after clients migrate
+- at least 32 random bytes before encoding;
+- constant-time comparison after hashing or equivalent bounded comparison;
+- no token value in logs;
+- independently rotatable without changing UUID.
+
+### 10.3 Mandatory bounded legacy overlap
+
+Migration from the existing hostname/UUID-derived subscription token MUST use a mandatory read-only overlap period. Immediate cutover with no overlap is not allowed.
+
+During Phase C:
+
+```text
+new SUB_TOKEN accepted = yes
+legacy subscription token accepted read-only = yes
+legacy token may mutate state = no
+```
+
+Legacy acceptance may be disabled only after all of the following are true:
+
+1. the new canonical subscription URL using `SUB_TOKEN` has successfully refreshed;
+2. every known client has been updated and has successfully refreshed at least once;
+3. there has been no required legacy-token use during a configured grace period of at least 24 hours after the last known client migration;
+4. the operator explicitly completes the cutover gate.
+
+Tests MUST prove the old token still works read-only during overlap and returns unauthorized only after the explicit retirement condition.
+
+If a client is discovered to have missed migration, rollback re-enables the read-only overlap; UUID remains unchanged.
+
+## 11. Authentication layers
+
+### Data plane
+
+`UUID` is tunnel authentication only. It MUST NOT serve as admin password, subscription-token seed after migration, or optimizer-token fallback.
+
+### Admin plane
+
+Layer 1: Cloudflare Access human policy.
+
+Layer 2: Worker `ADMIN` login/session.
+
+`ADMIN` has no fallback to `PASSWORD`, `TOKEN`, `KEY`, `UUID`, or other aliases.
+
+### Ops plane
+
+Layer 1: Cloudflare Access Service Auth using a dedicated NAS service token.
+
+Layer 2: Worker `OPTIMIZER_TOKEN`.
+
+The Access service token and `OPTIMIZER_TOKEN` are independent credentials. The NAS does not receive a Cloudflare account deployment token merely to call ops APIs.
 
 ## 12. Legacy secret surface removal
 
-The following legacy features should be removed rather than hardened unless a concrete current use case is identified during implementation review:
+Unless a concrete use case is proven, remove:
 
-1. Admin endpoint that accepts Cloudflare Global API Key / API Token through URL query parameters.
-2. Persistence of Cloudflare high-value credentials in KV (`cf.json`).
-3. Persistence of Telegram bot credentials in general configuration KV if Telegram integration is retained without a dedicated secret binding.
-4. Generic admin password fallback through `PASSWORD`, `TOKEN`, `KEY`, or `UUID` aliases.
-
-If Telegram notification remains desired, its bot token becomes a Worker secret and only non-sensitive notification configuration may remain in KV.
+1. Admin query-string Cloudflare Global API Key/API Token handling.
+2. Cloudflare high-value credential persistence in KV (`cf.json`).
+3. Telegram bot-token persistence in general KV; if Telegram remains, token becomes a Worker secret.
+4. Generic admin-password fallback through `PASSWORD`, `TOKEN`, `KEY`, or `UUID`.
 
 ## 13. Cloudflare deployment credential separation
 
-The current production workflow uses one Cloudflare API token across Worker/KV deployment and Zone/WAF configuration. Split capabilities:
+Split the current broad Cloudflare token into:
 
 ### Worker deploy token
 
-Only permissions required to deploy the Worker, manage required Worker resources, and bind the production KV/DO configuration.
+Only permissions required to deploy Worker resources, KV/DO bindings, and Worker secrets.
 
 ### Zone security token
 
-Only permissions required to manage the intended hostname-scoped Zone/WAF rules.
+Only permissions required for intended hostname-scoped Zone/WAF policy.
 
-Security policy configuration should become an explicit, separately triggered infrastructure action rather than an implicit mutation on every Worker deploy.
+Zone security changes become an explicit infrastructure action instead of an implicit mutation on every Worker deployment.
 
-This reduces credential blast radius and makes Worker deployment deterministic even if Zone security configuration is unchanged.
+## 14. Migration sequencing without a control-route exception
 
-## 14. Cloudflare edge-policy strategy
+The final host matrix is absolute: once enforcement is enabled, data-plane hosts do not serve admin or machine-control routes other than the bounded measurement exception.
 
-### Data-plane hostnames
+To migrate without inventing a contradictory temporary role, use sequencing rather than a runtime bypass flag.
 
-Custom Domain and production `workers.dev` data-plane hostnames may use tunnel-compatible edge settings required for non-browser clients. Relaxations MUST be scoped to the specific data hostname whenever the Cloudflare product supports such scoping.
+### Phase A — code/contracts, enforcement off in production
 
-### Admin hostname
+- implement host-role classifier and configuration validation;
+- add pairwise-disjoint role tests;
+- add unknown-host tests;
+- add canonical subscription-host tests;
+- add bounded data-plane probe tests;
+- add independent credential tests;
+- production routing behavior remains unchanged.
 
-Protected by an Access self-hosted application with deny-by-default semantics and a human Allow policy. Worker admin auth remains mandatory behind Access.
+### Phase B — additive hostnames, old behavior still unchanged
 
-### Ops hostname
+- enable/register production `workers.dev` as DR data host;
+- add `ADMIN_HOSTNAME` and `OPS_HOSTNAME`;
+- configure Access policies;
+- verify new admin and ops hostnames while the old single-host behavior still exists exactly as before;
+- do not enable the new host-matrix enforcement yet.
 
-Protected by an Access self-hosted application with Service Auth policy tied to the NAS service token. Worker `OPTIMIZER_TOKEN` remains mandatory behind Access.
+This phase is intentionally no worse than the current pre-separation posture; there is no ad-hoc compatibility exception inside the final authorization matrix.
 
-No global zone weakening is introduced.
+### Phase C — migrate consumers
 
-## 15. Migration phases
+- move browser admin use to `ADMIN_HOSTNAME`;
+- move machine mutation/status API calls to `OPS_HOSTNAME`;
+- keep ingress candidate probing against `CANONICAL_EDGE_HOST` via the bounded data-plane probe endpoint;
+- enable `SUB_TOKEN` while retaining mandatory read-only legacy overlap;
+- update known subscription clients and verify refresh.
 
-### Phase A — contracts only
+### Phase D — atomic enforcement cutover
 
-- Add host role classification module.
-- Add unknown-host default-deny tests.
-- Add host/route matrix tests.
-- Add canonical subscription-host tests.
-- Add strict credential-loading tests.
-- Add independent subscription-token tests.
-- No routing or credential behavior changes in production.
+Only after Phase C evidence is complete:
 
-### Phase B — additive hostnames
+- enable strict host-role enforcement;
+- data-plane admin routes disappear;
+- data-plane machine-control routes disappear except the exact measurement endpoint;
+- admin and ops host roles become exclusive;
+- unknown hosts fail closed.
 
-- Enable the production `workers.dev` route as a registered data-plane DR hostname.
-- Add `${ADMIN_HOSTNAME}` and `${OPS_HOSTNAME}` as additional Custom Domains.
-- Configure Cloudflare Access policies.
-- Keep old control routes temporarily available on the existing data-plane host behind a migration flag.
-- Validate admin, ops, subscription, tunnel, Custom Domain, and `workers.dev` behavior from real networks.
+No compatibility flag may re-enable `/admin` or general `/ops/*` on data-plane hosts after this cutover.
 
-### Phase C — client migration
+### Phase E — retire legacy secrets and overlap
 
-- Point NAS optimizer to `${OPS_HOSTNAME}` with Access service credentials + optimizer token.
-- Move browser admin bookmarks/usage to `${ADMIN_HOSTNAME}`.
-- Rotate to independent `SUB_TOKEN` and update subscription clients.
-- Keep `CANONICAL_EDGE_HOST` on the existing Custom Domain initially unless performing a separate intentional data-plane hostname migration.
-
-### Phase D — retire legacy control routes
-
-- Disable admin and ops routes on every data-plane hostname.
-- Remove legacy credential fallback.
-- Remove legacy CF/TG secret-management endpoints and stored secret material after backup/rotation decisions.
-
-### Phase E — security policy cleanup
-
-- Scope data-plane compatibility rules to explicit data-plane hostnames only.
-- Verify admin/ops Access enforcement.
-- Split deploy and Zone-security GitHub secrets/tokens.
+- disable legacy subscription token only after section 10.3 gates pass;
+- remove credential fallback and legacy secret-management surfaces;
+- split Cloudflare deployment/security tokens.
 
 ### Optional Phase F — canonical host switch
 
-If the operator later chooses `workers.dev` as the primary/canonical endpoint:
+After the current optimizer experiment and a separate ingress baseline decision:
 
-- confirm the production `workers.dev` route is enabled and in `DATA_PLANE_HOSTS`;
-- set `CANONICAL_EDGE_HOST` to that exact production `workers.dev` hostname;
-- run subscription and tunnel canaries;
-- refresh clients;
-- retain at least one Custom Domain as an alternate data-plane hostname where practical;
-- do not rotate UUID merely for the hostname switch.
+- set `CANONICAL_EDGE_HOST` to the exact production `workers.dev` hostname if desired;
+- run tunnel/subscription canaries;
+- update NAS probe SNI/Host to the new canonical host;
+- treat subsequent measurements as a new baseline;
+- retain a Custom Domain as alternate data-plane host where practical.
 
-## 16. Rollback strategy
+## 15. Rollback
 
-Migration MUST be reversible without changing tunnel credentials.
+- Before Phase D, rollback means continuing to use the old single-host behavior while fixing new Access/host configuration.
+- After Phase D, rollback restores the previous deployment/configuration as one explicit release; do not selectively reopen control routes on arbitrary data-plane hosts.
+- Canonical-host rollback restores the previous `CANONICAL_EDGE_HOST` and corresponding NAS probe Host/SNI.
+- Subscription-token rollback re-enables the bounded read-only legacy overlap.
+- UUID does not rotate for hostname/control-plane rollback.
 
-- Additional hostnames are introduced before old routes are removed.
-- Old control routes remain available only during a bounded compatibility period.
-- Both Custom Domain and production `workers.dev` data-plane endpoints may coexist.
-- If Access or hostname migration fails, revert clients/NAS to the previous registered hostname before disabling the new one.
-- A canonical-host switch is rolled back by restoring the previous `CANONICAL_EDGE_HOST` and refreshing subscription clients.
-- Do not rotate `UUID` as part of control-plane or hostname rollback.
-- Credential rotation is a separate explicit step with documented previous/new overlap where needed.
+## 16. Test and evidence gates
 
-## 17. Test and evidence gates
+Before implementation can be merged:
 
-Before implementation is mergeable:
+1. `DATA_PLANE_HOSTS`, `ADMIN_HOSTS`, and `OPS_HOSTS` are proven pairwise disjoint; overlaps fail configuration validation.
+2. `CANONICAL_EDGE_HOST` must belong only to the data-plane role.
+3. Unknown/unregistered hosts fail before route dispatch.
+4. Admin/ops hostnames cannot start tunnel sessions.
+5. Registered Custom Domain and production `workers.dev` data hosts can start tunnel sessions.
+6. Subscription output always uses `CANONICAL_EDGE_HOST`.
+7. Data-plane candidate probing uses candidate IP + `CANONICAL_EDGE_HOST` TLS SNI/HTTP Host and preserves the fixed 65,536-byte contract.
+8. Ops-host Access policy is not used as the ingress measurement path.
+9. No credential fallback exists between ADMIN/UUID/SUB/OPTIMIZER roles.
+10. Mandatory legacy subscription overlap is tested through migration and explicit retirement.
+11. Existing protocol tests remain green.
+12. Wrangler dry-run succeeds.
+13. Production rollout does not combine hostname migration, Stage C egress, or optimizer scoring changes.
 
-1. Host matrix unit tests prove each sensitive route is accepted only on its plane.
-2. Unknown/unregistered host tests prove route dispatch is not reached.
-3. Tunnel tests prove admin/ops hostnames cannot start tunnel sessions.
-4. Data-plane tests prove both the primary Custom Domain and explicitly registered production `workers.dev` hostname can start tunnel sessions.
-5. Subscription tests prove output always uses `CANONICAL_EDGE_HOST`, never the incoming admin/ops Host.
-6. Tests prove `CANONICAL_EDGE_HOST` must belong to `DATA_PLANE_HOSTS`.
-7. Credential tests prove no fallback between ADMIN/UUID/SUB/OPTIMIZER roles.
-8. Ops tests prove both Access-layer expectations (deployment configuration evidence) and Worker machine auth remain required.
-9. Admin mutation tests retain same-origin protections.
-10. Logs and responses do not expose credential values.
-11. Existing tunnel protocol test suite remains green.
-12. Wrangler dry-run succeeds for configured Custom Domains and the intended `workers.dev` setting.
-13. Production rollout uses an explicit canary/checklist and does not combine hostname migration with Stage C egress work or optimizer calibration changes.
+## 17. Decisions frozen by this revision
 
-## 18. Operational decisions frozen by this revision
+- One Worker remains the default topology.
+- Role sets are pairwise disjoint; a hostname has exactly one role.
+- Production `workers.dev` is a long-lived DR data-plane endpoint.
+- Default canonical recommendation remains an operator Custom Domain, but `CANONICAL_EDGE_HOST` may later switch to `workers.dev`.
+- Unknown hostnames fail closed.
+- Generated subscriptions use only `CANONICAL_EDGE_HOST`.
+- Stage B candidate-IP probes remain on the data-plane Host/SNI path through one bounded read-only endpoint.
+- Migration uses sequencing, not a temporary authorization exception in the final host matrix.
+- Legacy subscription-token overlap is mandatory and bounded until client migration is proven.
+- Current seven-day fixed-seed experiment is not altered.
 
-- One Worker remains the default long-term topology unless later isolation requirements justify separate Workers.
-- A production `workers.dev` hostname is supported as a continuously available disaster-recovery data-plane endpoint.
-- Default primary/canonical recommendation remains an operator Custom Domain because Cloudflare currently recommends Custom Domains/Routes for production and a custom domain preserves portability.
-- `CANONICAL_EDGE_HOST` is independently switchable to the production `workers.dev` hostname without changing tunnel credentials.
-- Unknown/unregistered hostnames always fail closed.
-- Admin `/sub` compatibility behavior is redirect-only or canonical-host rendering; it never emits the admin hostname into tunnel nodes.
-- Exact operator-selected hostnames stay outside reusable committed examples until deployment configuration is intentionally applied.
-- Telegram retention and legacy subscription-token overlap duration remain separate implementation decisions.
-- The ongoing fixed-seed NAS measurement window is not altered by this design revision; hostname/routing changes wait for a separate rollout gate.
-
-## 19. References checked 2026-08-24
+## 18. References checked 2026-08-24
 
 - Cloudflare Workers routes and domains: https://developers.cloudflare.com/workers/configuration/routing/
 - Cloudflare Workers `workers.dev`: https://developers.cloudflare.com/workers/configuration/routing/workers-dev/
@@ -428,4 +455,4 @@ Before implementation is mergeable:
 - Cloudflare Access for Workers/hostnames: https://developers.cloudflare.com/workers/configuration/cloudflare-access/
 - Cloudflare Access service tokens: https://developers.cloudflare.com/cloudflare-one/access-controls/service-credentials/service-tokens/
 
-These are implementation dependencies and must be rechecked before production rollout because Cloudflare product behavior can change.
+These are implementation dependencies and must be rechecked before production rollout.
