@@ -32,7 +32,7 @@ Reusable documentation and tests MUST use placeholders. Operator-specific domain
 - Kubernetes or microservice decomposition.
 - Replacing Durable Object authority.
 - Making the data plane dependent on interactive Cloudflare Access.
-- Switching production traffic to `workers.dev` during the current NAS measurement window.
+- Switching production traffic to `workers.dev` during the current NAS fixed-seed measurement window.
 
 ## 4. Terminology
 
@@ -418,6 +418,7 @@ Before implementation is mergeable:
 - Admin `/sub` compatibility behavior is redirect-only or canonical-host rendering; it never emits the admin hostname into tunnel nodes.
 - Exact operator-selected hostnames stay outside reusable committed examples until deployment configuration is intentionally applied.
 - Telegram retention and legacy subscription-token overlap duration remain separate implementation decisions.
+- The ongoing fixed-seed NAS measurement window is not altered by this design revision; hostname/routing changes wait for a separate rollout gate.
 
 ## 19. References checked 2026-08-24
 
