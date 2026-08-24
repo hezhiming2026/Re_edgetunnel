@@ -1,7 +1,7 @@
 # B2 Control-Plane Separation and Credential Lifecycle Design
 
 Date: 2026-08-15
-Updated: 2026-08-24
+Updated: 2026-08-25
 Status: design review
 Scope: design only; no production routing changes
 
@@ -65,6 +65,10 @@ The UUID actually accepted by the current production tunnel implementation. It m
 ### Legacy KEY shortcut
 
 The documented exact `/<KEY>` subscription shortcut. It is a read-only compatibility route, not a general authorization mechanism and not admin authority.
+
+### Admin session epoch
+
+A version/namespace included in Worker-side admin-session validation. Rotating it invalidates every session minted under the previous credential boundary without requiring knowledge of individual cookies.
 
 ### Credential handoff
 
@@ -284,38 +288,48 @@ Cloudflare Access human policy is layer 1. Worker `ADMIN` session/auth is layer 
 
 `ADMIN` has no permanent fallback to `PASSWORD`, `TOKEN`, `KEY`, `UUID`, or other aliases after migration.
 
+Admin sessions MUST also be bound to the current admin credential boundary through an explicit `ADMIN_SESSION_EPOCH` (or equivalent namespace/version). A session minted under an older epoch is invalid even if its KV record has not yet expired.
+
 ### 11.3 Ops credentials
 
 Cloudflare Access Service Auth is layer 1. `OPTIMIZER_TOKEN` is layer 2. Access service credentials and `OPTIMIZER_TOKEN` are independent and separately revocable.
 
-### 11.4 Materialize ADMIN before UUID materialization when required
+### 11.4 Atomic ADMIN + effective-UUID identity cutover
 
-Current legacy code may resolve `adminPassword` through aliases that include `UUID`. An invalid explicit legacy `UUID` can therefore simultaneously act as an admin fallback input while a different valid tunnel UUID is derived from it.
+Legacy code can couple admin resolution and tunnel identity derivation. In particular, when explicit `UUID` is omitted or invalid, changing `ADMIN` first may change the input used to derive the effective tunnel UUID. Therefore an ADMIN-only intermediate deployment is forbidden whenever admin/UUID derivation are coupled.
 
-Before writing a derived effective tunnel UUID back into explicit `UUID`, the migration MUST determine whether the currently effective admin credential depends on `UUID`, `uuid`, or any other fallback input that will change as part of identity materialization.
+Before changing `ADMIN`, `UUID`, or any legacy alias involved in either calculation, the migration MUST, using the still-running pre-cutover configuration:
 
-If it does, the migration MUST first:
+1. compute and record as non-secret evidence the exact **pre-change effective tunnel UUID** value/fingerprint produced by the current production algorithm;
+2. determine the currently effective admin-credential source and whether any `UUID`/`KEY`/legacy alias participates in admin resolution or tunnel UUID derivation;
+3. prepare a new independent high-entropy `ADMIN` secret;
+4. prepare explicit `UUID = <pre-change effective tunnel UUID>` exactly, byte-for-byte;
+5. prepare a new `ADMIN_SESSION_EPOCH` value and the code/configuration that rejects all prior-epoch sessions;
+6. prepare removal/disablement of every affected `UUID`/`KEY`/legacy alias as an admin-password fallback.
 
-1. provision a new independent high-entropy `ADMIN` secret;
-2. verify the dedicated ADMIN hostname through Cloudflare Access plus Worker login/session using that explicit `ADMIN`;
-3. verify admin resolution no longer depends on `UUID`/legacy aliases;
-4. only then write the effective tunnel UUID into explicit `UUID`.
+For a coupled legacy deployment, steps 3–6 MUST become effective in **one atomic identity-boundary cutover** (one release/configuration transaction from the application's perspective). There MUST NOT be a reachable state in which:
 
-An implementation MAY instead remove the UUID-to-admin fallback atomically with the UUID materialization, but it must prove there is no intermediate release in which the newly written tunnel UUID becomes an accepted admin password.
+- the new `ADMIN` is active while tunnel identity is still being re-derived from the changed admin input;
+- the pre-change effective tunnel UUID becomes an accepted admin password;
+- a legacy admin alias remains accepted after the new independent ADMIN boundary is declared established.
 
-### 11.5 Materialize the current effective UUID before fallback removal
+If the platform cannot make the secret/config/code changes atomic, use a compatibility release that first makes tunnel UUID resolution depend only on an explicit pre-change UUID and makes admin session validation epoch-aware **without changing the effective admin input**, then perform the final ADMIN/fallback/session-epoch switch. Every intermediate state must prove the tunnel UUID remains the pre-change value and that no tunnel-visible credential gains admin authority.
 
-Before any code that changes/removes legacy UUID derivation is deployed, the migration MUST:
+### 11.5 Post-cutover identity and session proof
 
-1. compute the exact effective tunnel UUID using the currently deployed production inputs and algorithm;
-2. satisfy section 11.4 first when admin resolution could be affected;
-3. record exactly that tunnel identity as explicit production `UUID` without changing its bytes;
-4. deploy while the old tunnel derivation path is still verifiably compatible or remove it atomically;
-5. prove the effective tunnel UUID before/after is identical;
-6. verify existing subscription output and at least one real tunnel canary still authenticate with that UUID;
-7. only then retire implicit tunnel derivation and credential aliases.
+Immediately after the atomic identity-boundary cutover, all of the following are mandatory before proceeding:
 
-If effective UUID equality cannot be proven, fallback retirement is blocked. This is identity materialization, not UUID rotation.
+1. effective tunnel UUID after cutover equals the recorded pre-change effective UUID exactly;
+2. existing subscription output and at least one real tunnel client authenticate with that unchanged UUID;
+3. the dedicated ADMIN hostname authenticates through Cloudflare Access plus the new explicit `ADMIN`;
+4. `UUID`, `KEY`, and every retired legacy alias fail Worker admin authentication;
+5. an admin session cookie minted before the epoch rotation is rejected even when its old KV record still exists;
+6. a newly minted session under the new ADMIN epoch succeeds only on the ADMIN role;
+7. session epoch/namespace rotation or purge evidence is recorded without logging credentials/cookies.
+
+If any equality/authentication/session-invalidation proof fails, the credential-boundary migration is blocked and must roll forward/back only through a state that preserves the pre-change tunnel UUID and does not resurrect legacy admin authority.
+
+This operation is identity materialization and privilege separation, not UUID rotation.
 
 ## 12. Legacy secret surface removal
 
@@ -324,9 +338,11 @@ Unless a concrete use case is proven, remove after migration gates pass:
 1. admin query-string Cloudflare Global API Key/API Token handling;
 2. Cloudflare high-value credential persistence in KV (`cf.json`);
 3. Telegram bot-token persistence in general KV; retained Telegram token becomes a Worker secret;
-4. generic admin-password fallback through `PASSWORD`, `TOKEN`, `KEY`, or `UUID`;
-5. implicit UUID derivation only after sections 11.4/11.5 are satisfied;
+4. generic admin-password fallback through `PASSWORD`, `TOKEN`, `KEY`, or `UUID` after section 11 atomic cutover;
+5. implicit UUID derivation only after section 11 proves explicit UUID equality;
 6. legacy `/<KEY>` subscription shortcut only after section 10.3 retirement gates are satisfied.
+
+Old admin-session namespaces/epochs MUST never be re-enabled during rollback merely to recover access. Rollback uses the explicit ADMIN boundary or a known-good enforcement-capable release.
 
 ## 13. Cloudflare deployment credential separation and revocation
 
@@ -353,8 +369,9 @@ Failure to revoke the old broad credential means least-privilege migration is in
 - implement complete host-role negative matrix tests;
 - implement canonical subscription host logic;
 - implement bounded DATA probe;
-- add strict credential role tests;
-- add independent ADMIN materialization and effective-UUID materialization support/tests;
+- add strict credential-role tests;
+- add pre-change effective-UUID calculation and atomic ADMIN/UUID cutover support/tests;
+- add admin-session epoch/namespace invalidation support/tests;
 - add split NAS ops/probe configuration support;
 - add exact read-only legacy `/<KEY>` compatibility handling;
 - production behavior remains unchanged.
@@ -364,22 +381,24 @@ Failure to revoke the old broad credential means least-privilege migration is in
 - add/provision `ADMIN_HOSTNAME` and `OPS_HOSTNAME`;
 - configure Access human and Service Auth policies;
 - provision NAS Access service credentials;
-- verify admin host with human Access + explicit Worker `ADMIN` auth;
+- verify Access reaches the ADMIN host boundary without changing the legacy Worker admin/tunnel credential inputs yet;
 - verify ops host with Access service token + `OPTIMIZER_TOKEN`;
 - verify separate NAS ops/probe configuration;
 - do not enable production `workers.dev` while host-agnostic routing remains active.
 
-### Phase C — migrate consumers while primary legacy path remains available
+### Phase C — migrate consumers and perform atomic identity-boundary cutover
 
 Order is normative:
 
-1. move browser admin use to `ADMIN_HOSTNAME`;
-2. provision/verify explicit independent `ADMIN` before any UUID write that could change admin fallback resolution;
-3. move machine mutation/status calls to `OPS_BASE_URL` with Access service credentials + `OPTIMIZER_TOKEN`;
-4. keep candidate probing on candidate IP + `CANONICAL_EDGE_HOST` via bounded DATA probe;
-5. enable `SUB_TOKEN` with mandatory read-only legacy token and `/<KEY>` overlap;
-6. migrate/verify known subscription clients and legacy shortcut users;
-7. materialize and verify the effective tunnel UUID as explicit `UUID`.
+1. compute the pre-change effective tunnel UUID and audit all legacy admin/tunnel credential inputs while the old production configuration is still intact;
+2. move machine mutation/status calls to `OPS_BASE_URL` with Access service credentials + `OPTIMIZER_TOKEN`;
+3. keep candidate probing on candidate IP + `CANONICAL_EDGE_HOST` via bounded DATA probe;
+4. enable `SUB_TOKEN` with mandatory read-only legacy token and `/<KEY>` overlap;
+5. migrate/verify known subscription clients and legacy shortcut users;
+6. prepare explicit `UUID=<pre-change effective UUID>`, independent `ADMIN`, new admin session epoch, and legacy-admin-fallback removal;
+7. perform the section 11.4 atomic identity-boundary cutover; no ADMIN-only intermediate state is allowed for coupled deployments;
+8. perform every post-cutover tunnel/admin/legacy-cookie proof in section 11.5;
+9. move normal browser admin use to `ADMIN_HOSTNAME` under the new explicit ADMIN/session epoch.
 
 ### Phase D — atomic host-role enforcement and `workers.dev` enablement
 
@@ -393,12 +412,11 @@ After Phase C evidence is complete:
 
 No compatibility flag may reopen admin/general-ops authority on a DATA hostname.
 
-### Phase E — retire legacy credentials and shortcuts
+### Phase E — retire remaining legacy credentials and shortcuts
 
 - disable legacy subscription token and `/<KEY>` only after section 10.3 gates pass;
-- remove admin credential fallbacks only after explicit `ADMIN` is proven;
-- remove implicit UUID derivation only after sections 11.4/11.5 proof;
-- remove legacy secret-management surfaces;
+- remove any remaining legacy secret-management surfaces;
+- confirm legacy admin aliases and old admin-session epochs remain permanently invalid;
 - complete Cloudflare least-privilege token handoff and revoke old broad token.
 
 ### Optional Phase F — canonical host switch
@@ -408,10 +426,11 @@ Only after the current optimizer experiment and a separate ingress baseline deci
 ## 15. Rollback
 
 - Before strict enforcement, rollback keeps the existing primary route while fixing new Access/control-host configuration.
+- The identity-boundary cutover MUST NOT roll back by re-enabling legacy `UUID`/`KEY` admin aliases or an old admin-session epoch. If rollback is required, restore an explicit UUID equal to the pre-change tunnel UUID and an explicit independent ADMIN under a fresh/current session epoch.
 - After `workers.dev` has been exposed, rollback to any release/configuration lacking strict DATA-only enforcement MUST satisfy section 9.1: disable `workers.dev` before or atomically with the rollback.
 - A rollback may keep `workers.dev` enabled only when the rollback target itself enforces the same DATA-only host matrix.
 - If a `workers.dev` canary fails while enforcement remains healthy, disable only that route and keep the primary Custom Domain.
-- Subscription rollback re-enables bounded read-only legacy token + exact `/<KEY>` overlap.
+- Subscription rollback re-enables bounded read-only legacy token + exact `/<KEY>` overlap; it does not restore admin authority to `KEY`.
 - Ops rollback restores NAS control calls only to a previously proven endpoint intentionally supported by the current phase.
 - UUID is never rotated for hostname/control-plane rollback; explicitly materialized effective UUID remains the identity anchor.
 - Cloudflare broad-token revocation is not undone; rollback uses the new scoped credentials.
@@ -432,19 +451,22 @@ Implementation is not mergeable until all applicable gates pass:
 10. Access-protected OPS hostname is not used for ingress scoring;
 11. NAS ops calls require Access service credentials + `OPTIMIZER_TOKEN`;
 12. NAS DATA probe does not send Access credentials;
-13. explicit `ADMIN` is installed/verified before UUID materialization whenever current admin resolution could be changed by the UUID write;
-14. no intermediate state allows the tunnel UUID to become an admin credential;
-15. current effective tunnel UUID is materialized explicitly and equality is proven before derivation/fallback removal;
-16. existing tunnel client canary succeeds before and after UUID materialization;
-17. mandatory legacy token and exact `/<KEY>` overlap are tested through explicit retirement;
-18. existing `/<KEY>` clients are proven migrated before shortcut removal;
-19. least-privilege Worker and zone credentials are independently validated;
-20. superseded broad Cloudflare token is explicitly revoked;
-21. logs/responses expose no credential values;
-22. existing tunnel protocol tests remain green;
-23. Wrangler dry-run succeeds;
-24. rollout does not combine hostname migration with Stage C egress or optimizer-v2 scoring changes;
-25. current seven-day fixed-seed optimizer experiment remains unchanged.
+13. pre-change effective tunnel UUID is computed before any ADMIN/UUID/legacy-alias mutation that could affect derivation;
+14. coupled legacy deployments perform explicit UUID + independent ADMIN + admin-fallback removal + session-epoch rotation atomically, or through a compatibility release with no credential-changing intermediate state;
+15. no intermediate state changes tunnel UUID or allows tunnel UUID/KEY/legacy alias to become an admin credential;
+16. current effective tunnel UUID is identical before/after materialization and a real tunnel canary proves it;
+17. old `UUID`/`KEY`/legacy-alias admin login attempts fail after cutover;
+18. admin sessions minted under the old credential/session epoch are rejected after cutover even if their KV records have not expired;
+19. new ADMIN sessions succeed only under the current epoch and ADMIN role;
+20. mandatory legacy subscription token and exact `/<KEY>` overlap are tested through explicit retirement;
+21. existing `/<KEY>` clients are proven migrated before shortcut removal;
+22. least-privilege Worker and zone credentials are independently validated;
+23. superseded broad Cloudflare token is explicitly revoked;
+24. logs/responses expose no credential or session values;
+25. existing tunnel protocol tests remain green;
+26. Wrangler dry-run succeeds;
+27. rollout does not combine hostname migration with Stage C egress or optimizer-v2 scoring changes;
+28. current seven-day fixed-seed optimizer experiment remains unchanged.
 
 ## 17. Decisions frozen by this revision
 
@@ -456,8 +478,9 @@ Implementation is not mergeable until all applicable gates pass:
 - Generated subscriptions use `CANONICAL_EDGE_HOST`.
 - Stage B ingress probes stay on DATA Host/SNI via exact bounded probe.
 - NAS ops API and probe configuration are separated; Access service credentials apply only to OPS traffic.
-- Independent `ADMIN` is established before UUID materialization whenever legacy admin fallback could otherwise change to the tunnel UUID.
-- Current effective tunnel UUID is materialized and verified before legacy derivation/fallback removal.
+- For coupled legacy deployments, pre-change effective UUID is computed before credential mutation and explicit UUID + independent ADMIN + admin fallback removal + session-epoch rotation occur atomically; there is no ADMIN-only intermediate state.
+- Old admin sessions are invalidated at the new credential boundary by epoch/namespace rotation or equivalent purge; legacy cookies never survive the separation cutover.
+- Current effective tunnel UUID is preserved exactly; this migration never rotates it merely to separate credentials.
 - Legacy subscription-token and documented exact `/<KEY>` compatibility overlap is mandatory until client migration is proven.
 - Cloudflare least-privilege migration is incomplete until the old broad token is revoked.
 - Current seven-day fixed-seed experiment is not altered.
