@@ -3,208 +3,176 @@
 Date: 2026-08-15
 Updated: 2026-08-24
 Status: design review
-Scope: design only; current Stage B scoring and NAS runtime are unchanged
+Scope: design only; current Stage B scoring and current seven-day fixed-seed experiment are unchanged
 
 ## 1. Problem statement
 
-Stage B intentionally starts with a simple, explainable per-cycle model: probe each candidate three times, derive reliability/TTFB/total/throughput metrics, rank eligible candidates, and apply hysteresis before publication.
+Stage B intentionally uses a simple per-cycle model: probe each candidate three times, derive reliability/TTFB/total/throughput metrics, rank eligible candidates, and apply hysteresis before publication.
 
-That is appropriate for initial rollout, but a single cycle cannot distinguish a genuinely stable ingress from a temporarily fast ingress. The NAS now persists detailed run history, so the next version should use that evidence without turning the optimizer into an opaque or unstable learning system.
+Optimizer v2 adds historical stability, confidence, shadow evaluation, and conservative canary progression. The design must preserve these invariants:
 
-This design adds historical stability and measurement confidence while preserving these principles:
-
-1. a recent hard failure can never be hidden by a good long-term average;
-2. history should reduce churn, not make stale nodes immortal;
-3. the system must remain inspectable and deterministic from local evidence;
-4. shadow evaluation must simulate a continuous hypothetical v2 history, not isolated per-cycle recommendations;
-5. canary experiments must retain a pinned last-known-good restoration point until the experiment is explicitly graduated.
+1. current-cycle hard failures can never be hidden by historical reputation;
+2. history reduces churn but never makes stale nodes immortal;
+3. shadow mode simulates a continuous hypothetical v2 world, not isolated recommendations;
+4. every shadow-current entry used for a decision must have current-cycle measurement evidence;
+5. every newcomer must pass through an observed canary before it can appear in a promoted pool;
+6. a pre-canary restore point stays pinned until the experiment is explicitly graduated;
+7. restoring a baseline is permitted only if that baseline is still currently safe;
+8. graduation is allowed only while the observed promoted revision/pool is still exactly the one under experiment.
 
 ## 2. Goals
 
 - Use recent historical NAS measurements to distinguish stable candidates from one-cycle winners.
-- Use time-aware EWMA so recent measurements matter more than old measurements.
+- Use time-aware EWMA with bounded historical influence.
 - Represent confidence/sample maturity explicitly.
-- Keep hard health/eligibility gates separate from ranking.
-- Add a conservative hybrid-pool promotion stage before a substantially changed pool replaces a healthy current pool.
-- Produce human-readable reasons for selection/rejection in persisted machine-readable evidence.
-- Support a stateful shadow evaluation before historical scoring is allowed to mutate ADD.
-- Simulate canary progression and restore behavior in shadow mode using an independent hypothetical revision lineage.
+- Keep current hard health gates separate from historical ranking.
+- Maintain an independent v2 shadow revision lineage after divergence from Stage B.
+- Add configuration-level hybrid canaries before substantial pool replacement.
+- Support multiple canary waves when more newcomers are desired than one safe wave allows.
+- Persist deterministic, non-secret evidence for each hypothetical transition.
+- Keep real ADD publication disabled until shadow evidence is reviewed.
 
-## 3. Non-goals for the current implementation slice
+## 3. Non-goals for this slice
 
-- Machine learning, neural models, external telemetry services, Redis, PostgreSQL, or cloud databases.
-- Predicting ISP routing changes.
-- Stage C destination egress selection.
-- Changing Cloudflare CIDR allowlists automatically from untrusted sources.
+- Machine learning or external telemetry databases.
+- Stage C destination-egress selection.
+- Changing Cloudflare CIDR allowlists from untrusted sources.
 - Traffic-percentage canaries; ADD pools do not provide deterministic weighted traffic splitting.
-- Enabling v2 automatic publication before shadow evidence is reviewed.
-- Implementing operator convenience commands such as `report`, `top`, `compare`, `doctor`, or `reconcile` in this slice. Those remain future operational work and are intentionally deferred.
-- Changing the current seven-day fixed-seed calibration experiment or its Stage B sampling parameters.
+- Automatic v2 publication before shadow evidence is reviewed.
+- `report`, `top`, `compare`, `doctor`, or `reconcile` convenience tooling.
+- Adaptive sampling during the current seven-day fixed-seed experiment.
 
 ## 4. Terminology
 
 ### Instant score
 
-The score calculated from the current cycle only. Stage B already uses reliability, median TTFB, p95 total time, and throughput.
+Score from the current cycle only.
 
-### Stability
+### Stability score
 
-How consistently a candidate has remained healthy and performant across multiple cycles and time periods.
+Historical quality derived from repeated reliability, TTFB, total-time, throughput, eligibility, and failure evidence.
+
+### Confidence
+
+How much independent temporal evidence exists. Confidence changes how much history is trusted; it is not an additive quality bonus.
 
 ### EWMA
 
-Exponentially Weighted Moving Average. New measurements receive more weight than older measurements, while old evidence decays gradually instead of disappearing at a fixed boundary.
-
-A time-aware form is preferred:
+Time-aware exponentially weighted moving average:
 
 ```text
 decay = exp(-ln(2) * elapsed_time / half_life)
 EWMA_new = decay * EWMA_old + (1 - decay) * measurement
 ```
 
-`half_life` is the time required for old evidence to lose half its influence. It MUST be a documented configuration value, not an implicit magic constant.
-
-### Confidence
-
-How much independent temporal evidence exists for a candidate. Confidence is not the same as quality. A well-measured bad node should have high confidence that it is bad.
-
-### Hysteresis
-
-A deliberate threshold that prevents frequent switching when two pools are nearly equivalent. Stage B already requires a meaningful improvement before replacing a healthy pool.
-
-### Hybrid-pool canary
-
-A temporary ADD pool containing current-cycle-eligible retained entries plus a limited number of fully qualified challengers.
-
-It is NOT a traffic-percentage canary: client selection/urltest behavior may send disproportionate traffic to a challenger.
-
-### Revision lineage
-
-An ordered version ancestry describing how a pool evolved: current revision, its predecessor, canary revision, and related state transitions.
-
 ### Shadow mode
 
-A non-authoritative simulation in which v2 performs the same decisions and state transitions it would perform if it controlled ADD, while real Stage B/production authority remains unchanged.
+A non-authoritative simulation where v2 performs the state transitions it would perform if it controlled ADD, while real Stage B/Worker authority remains unchanged.
+
+### Shadow revision lineage
+
+The hypothetical ancestry of v2 pools (`shadow_current`, `shadow_previous`, canary revision, promotion revision), independent from real Stage B revisions.
 
 ### Pre-canary baseline
 
-The pinned last-known-good pool from immediately before a canary experiment begins. It is the experiment's restoration point and is not the same as the moving `previous` revision.
+The pinned last-known-good pool from immediately before a canary experiment. It is the experiment's restore point, not simply the moving `previous` revision.
 
-## 5. Evidence sources
+### Canary wave
 
-No new remote datastore is required.
+One observed hybrid step introducing a bounded set of newcomers. A later wave may introduce additional newcomers only after the prior wave has been observed/proven.
 
-Primary evidence:
+## 5. Evidence and persisted state
 
-- `/data/runs/*.json` detailed recent runs;
-- `/data/history.jsonl` compact cycle summaries;
-- `/data/current.json` active Stage B optimizer pool when publication is later enabled;
-- `/data/previous.json` previous Stage B optimizer pool.
+Primary local evidence:
 
-Derived candidate statistics may be persisted atomically in:
+- `/data/runs/*.json`;
+- `/data/history.jsonl`;
+- `/data/current.json` / `previous.json` for Stage B authority when publication is eventually used.
+
+Derived non-secret files:
 
 ```text
 /data/candidate-stats.json
-```
-
-Shadow state may be persisted atomically in:
-
-```text
 /data/v2-shadow-state.json
 ```
 
-Both derived files MUST be non-secret and bounded. Candidate statistics MUST be rebuildable from retained detailed runs. Corrupt shadow state MUST disable shadow progression until rebuilt/reset; it MUST NOT affect Stage B measurement or production authority.
+Candidate statistics must be rebuildable from retained detailed runs. Corrupt shadow state stops shadow progression but does not stop Stage B measurement.
 
-## 6. Keep hard eligibility separate from historical ranking
+Minimal shadow state:
 
-Historical success must never rescue a currently unhealthy candidate.
+```json
+{
+  "schema_version": 1,
+  "phase": "baseline|canary|promoted_observation|graduated|restore_blocked",
+  "shadow_current": {"revision":"shadow-...","entries":[],"fingerprint":"..."},
+  "shadow_previous": null,
+  "shadow_canary": null,
+  "promoted_experiment": null,
+  "pre_canary_baseline": null,
+  "canary_wave": 0,
+  "updated_at":"...",
+  "reason":"..."
+}
+```
+
+Fingerprints are deterministic hashes of canonicalized selected entries and are used to verify that the pool being observed is the same pool later promoted/graduated/restored.
+
+## 6. Current hard eligibility always wins
 
 A candidate first passes current-cycle hard gates, including at minimum:
 
 - at least 2 successful probes out of 3;
-- current median TTFB within the configured eligibility bound;
+- median TTFB inside the configured bound;
 - valid TLS/probe contract;
 - allowed Cloudflare CIDR;
-- no disqualifying current-cycle network error pattern.
+- no disqualifying current-cycle error pattern.
 
-Only candidates that pass current hard gates are ranked using historical evidence.
+Only current-cycle-eligible candidates may participate in ranking, retention, canary, promotion, restore, or unhealthy recovery.
 
 Example:
 
 ```text
-7 days excellent history
-+
-current cycle 0/3 success
-=
-INELIGIBLE
+excellent 7-day history + current 0/3 = INELIGIBLE
 ```
 
-This rule applies equally to challengers and retained current-pool entries.
+This applies equally to challengers, current Stage B winners, shadow incumbents, and members of a pinned baseline.
 
 ## 7. Historical candidate state
 
-For each candidate address maintain non-secret, bounded fields such as:
+Per address, maintain bounded non-secret fields such as:
 
 ```json
 {
-  "address": "192.0.2.1",
-  "first_seen_at": "...",
-  "last_seen_at": "...",
-  "cycles_seen": 12,
-  "successful_cycles": 11,
-  "probe_successes": 34,
-  "probe_attempts": 36,
-  "dayparts_seen": 4,
-  "ewma_reliability": 0.98,
-  "ewma_ttfb_ms": 73.4,
-  "ewma_total_ms": 128.0,
-  "ewma_throughput_bps": 1234567,
-  "top8_count": 7,
-  "consecutive_eligible": 5,
-  "consecutive_failures": 0
+  "address":"192.0.2.1",
+  "first_seen_at":"...",
+  "last_seen_at":"...",
+  "cycles_seen":12,
+  "successful_cycles":11,
+  "probe_successes":34,
+  "probe_attempts":36,
+  "dayparts_seen":4,
+  "ewma_reliability":0.98,
+  "ewma_ttfb_ms":73.4,
+  "ewma_total_ms":128.0,
+  "ewma_throughput_bps":1234567,
+  "top8_count":7,
+  "consecutive_eligible":5,
+  "consecutive_failures":0
 }
 ```
 
-No hostname, token, Worker base URL, Access secret, or other runtime credential is stored in historical candidate state.
+No hostname, token, Worker base URL, Access secret, or other runtime credential is stored.
 
-## 8. Time-aware EWMA and two-week calibration
+## 8. Initial EWMA and confidence calibration
 
-Per-cycle intervals are not perfectly fixed, and manual runs can occur between daemon cycles. EWMA therefore uses elapsed wall-clock time rather than assuming every observation is exactly six hours apart.
-
-Separate EWMAs may be maintained for:
-
-- probe reliability;
-- TTFB;
-- total response time;
-- throughput.
-
-The operator's first multi-week measurement window was analyzed in aggregate and recorded separately in `docs/superpowers/reports/2026-08-24-b2-optimizer-v2-two-week-calibration.md` without committing operator-specific addresses or raw data.
-
-Initial shadow values are:
+The first multi-week operator measurement window was analyzed in aggregate in the separate calibration report. Initial shadow values:
 
 ```text
 EWMA_HALF_LIFE_HOURS=36
 MAX_HISTORY_WEIGHT=0.30
 ```
 
-These are shadow calibration values, not permanently frozen production constants. The ongoing fixed-seed window is intended to validate or adjust them.
-
-## 9. Stability score
-
-The stability score should be derived from historical metrics in the same direction as instant performance:
-
-- higher reliability is better;
-- lower TTFB is better;
-- lower total time is better;
-- higher throughput is better;
-- repeated eligibility across independent cycles/dayparts is better;
-- recent failures impose a penalty.
-
-The ranking should remain relative to the current eligible candidate cohort where practical, so absolute ISP speed changes do not invalidate the scale.
-
-## 10. Confidence model
-
-Confidence influences how strongly history is trusted; it does not grant an independent performance bonus.
+Historical blending:
 
 ```text
 historical_weight = MAX_HISTORY_WEIGHT * confidence
@@ -212,28 +180,16 @@ final_score = instant_score * (1 - historical_weight)
             + stability_score * historical_weight
 ```
 
-Initial maturity guidance from the two-week calibration:
+Initial maturity guidance:
 
 ```text
-low:
-  < 8 independent cycles OR < 24h coverage
-
-medium:
-  >= 12 independent cycles
-  >= 48h coverage
-  >= 3 distinct dayparts
-
-high:
-  >= 24 independent cycles
-  >= 5 days coverage
-  all 4 dayparts represented
-
-fully mature:
-  >= 28 independent cycles
-  >= 7 days coverage
+low:    <8 independent cycles OR <24h coverage
+medium: >=12 cycles, >=48h, >=3 dayparts
+high:   >=24 cycles, >=5 days, all 4 dayparts
+mature: >=28 cycles, >=7 days
 ```
 
-A conservative initial composition is:
+Conservative confidence composition:
 
 ```text
 cycle_confidence    = min(cycles_seen / 24, 1)
@@ -242,315 +198,354 @@ daypart_confidence  = min(dayparts_seen / 4, 1)
 confidence          = min(cycle_confidence, coverage_confidence, daypart_confidence)
 ```
 
-The fixed-seed follow-up window must be reviewed before these thresholds control real publication.
+These remain shadow parameters until the fixed-seed follow-up window is reviewed.
 
-## 11. Shadow mode requires its own revision lineage
+## 9. Shadow measurement cohort requirement
 
-Optimizer v2 MUST first run in shadow mode and MUST maintain its own hypothetical state independently from real Stage B/production state.
+Once the current seven-day fixed-seed experiment finishes and v2 shadow progression begins, the measurement cohort MUST explicitly retain every address needed to evaluate the shadow state.
 
-A minimal shadow state is:
-
-```json
-{
-  "schema_version": 1,
-  "phase": "baseline|canary|promoted",
-  "shadow_current": {
-    "revision": "shadow-...",
-    "entries": []
-  },
-  "shadow_previous": {
-    "revision": "shadow-...",
-    "entries": []
-  },
-  "shadow_canary": null,
-  "pre_canary_baseline": null,
-  "updated_at": "...",
-  "reason": "..."
-}
-```
-
-Shadow revisions are local hypothetical identifiers and MUST never be sent as Worker authoritative revisions.
-
-For every scheduled cycle:
-
-1. Stage B computes its normal real `stage_b_selected` result.
-2. v2 evaluates the current measurements/history against `shadow_current`, not against the real Stage B current pool once the shadow lineages have diverged.
-3. v2 computes its hypothetical transition: hold, enter canary, progress canary, promote, or restore.
-4. The transition atomically updates `v2-shadow-state.json`.
-5. Persist enough evidence to reconstruct why the hypothetical transition occurred.
-6. Real ADD/Worker authority remains untouched.
-
-Example divergence:
+Per cycle, the candidate set must include the union of:
 
 ```text
-real Stage B lineage:  P100 -> P101 -> P102
-v2 shadow lineage:     S100 -> S101(canary) -> S102(promoted)
+real Stage B current entries
++ configured fixed seeds
++ every shadow_current entry
++ every active canary/promoted-observation entry
++ ordinary Stage B/random exploration candidates
 ```
 
-After divergence, v2 MUST NOT reset its hypothetical `current` to P101/P102 each cycle. Otherwise canary age, progression, churn, restore logic, and hysteresis cannot be meaningfully evaluated.
+Deduplication and Cloudflare-CIDR validation still apply.
 
-## 12. Promotion rules
+### 9.1 No stale-evidence progression
 
-The existing Stage B safety gates remain baseline invariants:
+A shadow transition that depends on an incumbent requires that incumbent to have the current cycle's three-probe evidence.
 
-- minimum eligible pool size;
-- `/24` diversity;
-- current-pool health exception;
-- hysteresis against unnecessary replacement;
-- revision CAS for real publication when eventually enabled.
-
-Optimizer v2 adds maturity constraints for challengers.
-
-A proposed challenger should normally have:
-
-- current-cycle eligibility;
-- more than one independent observation cycle unless recovering from an unhealthy current pool;
-- no recent repeated-failure streak;
-- sufficient confidence for the selected promotion stage.
-
-Emergency recovery from an unhealthy current pool must still be possible without waiting days for history, but historical reputation can never override a current hard-gate failure.
-
-## 13. Hybrid-pool canary: retained entries must also be healthy now
-
-The nominal healthy-pool canary target is:
+If any required `shadow_current`, active canary, promoted-observation, or pinned-baseline member lacks current-cycle measurements:
 
 ```text
-6 current-cycle-eligible retained entries
-+
-2 current-cycle-eligible mature challengers
-=
-8 entries
+shadow decision = hold / measurement_incomplete
 ```
 
-The implementation MUST NOT retain a currently failing old entry merely to preserve overlap.
+The implementation MUST NOT:
 
-Fallback rules:
+- reuse stale prior-cycle health as current eligibility;
+- mark the missing entry ineligible merely because it was not sampled;
+- advance canary age/promotion/graduation based on incomplete measurement.
 
-### Six or more current entries pass hard gates
+### 9.2 Current fixed-seed window remains frozen
 
-Use up to six highest-ranked eligible retained entries and up to two highest-qualified challengers, subject to `/24` diversity and all pool-level gates.
+This cohort augmentation is NOT enabled during the ongoing seven-day calibration experiment. Shadow lineage progression starts only after that experiment is reviewed or when a deliberately new measurement baseline begins.
 
-### Exactly five current entries pass hard gates
+## 10. Independent shadow lineage
 
-A conservative `5 + up to 3` hybrid MAY be simulated/used only if all added challengers meet the full challenger maturity gates and the resulting pool passes diversity/quality thresholds. Otherwise hold/no-publish.
+For every scheduled shadow cycle:
 
-### Exactly four current entries pass hard gates
-
-Do not run a normal automatic hybrid canary. Hold/no-publish while gathering evidence unless an explicit degraded/recovery rule applies. Do not manufacture a `4 + 4` canary merely to fill eight slots.
-
-### Fewer than four current entries pass hard gates
-
-Treat the current pool as unhealthy and enter the separate unhealthy-recovery decision path. Recovery may replace more entries than a normal canary, but every selected replacement still must pass current hard gates and pool safety constraints.
-
-The nominal `6 + 2` ratio is therefore a target, not a reason to carry failing retained entries.
-
-## 14. Pin the pre-canary baseline as a restoration point
-
-Before transitioning from a stable non-canary state into a hybrid canary, v2 MUST pin the current last-known-good pool as `pre_canary_baseline`.
+1. Stage B computes its normal real selection.
+2. The measurement completeness gate in section 9 runs.
+3. v2 evaluates measurements/history against `shadow_current`, not real Stage B current after divergence.
+4. v2 computes one hypothetical transition.
+5. The transition atomically updates `v2-shadow-state.json`.
+6. Real Worker/ADD authority remains untouched.
 
 Example:
 
 ```text
-S100 baseline:  A B C D E F G H
-S101 canary:    A B C D E F X Y
-S102 promoted:  A B C D X Y Z W
+real Stage B: P100 -> P101 -> P102
+v2 shadow:   S100 -> S101(canary) -> S102(promoted observation)
 ```
 
-While the experiment remains active:
+Shadow revision IDs are local only and are never sent to Worker authority.
+
+## 11. Challenger maturity
+
+A normal challenger must have:
+
+- current-cycle eligibility;
+- more than one independent observation cycle unless using the separate unhealthy-recovery path;
+- no recent repeated-failure streak;
+- sufficient confidence for the promotion stage;
+- required `/24` diversity and pool-level quality.
+
+Emergency unhealthy recovery remains possible, but no historical reputation can override a current hard-gate failure.
+
+## 12. Hybrid canary retained-entry rules
+
+Nominal canary:
 
 ```text
-pre_canary_baseline = S100
+6 currently eligible retained entries
++ 2 currently eligible mature challengers
+= 8
 ```
 
-It MUST NOT automatically advance to S101 merely because S101 becomes `shadow_previous`, and it MUST NOT advance to S102 merely because a full promotion occurs.
+Failing old entries are never retained just for overlap.
 
-If the canary/promoted challengers later fail before the experiment is explicitly graduated, restore the pinned S100 baseline in the shadow simulation.
+### >=6 eligible retained
 
-When real v2 publication is eventually enabled, restoration MUST be an expected-current-revision CAS publish (or equivalent atomic restore) of the pinned baseline entries. It MUST NOT rely on generic `rollback(previous)`, because `previous` may already contain challengers.
+Use up to six best eligible incumbents plus up to two fully qualified challengers.
 
-Only after the experiment satisfies graduation criteria may the system clear the old `pre_canary_baseline` and establish the newly proven pool as the next last-known-good baseline.
+### exactly 5 eligible retained
 
-This is the optimizer equivalent of a system restore point created before a risky upgrade.
+A guarded `5 + up to 3` canary MAY be used only when every challenger is fully qualified and pool-level gates pass. Otherwise hold.
 
-## 15. Canary observation, promotion, and graduation
+### exactly 4 eligible retained
 
-A hybrid pool becomes eligible for hypothetical/real full promotion only after evidence such as:
+Do not auto-create a normal `4+4` canary. Hold unless the separate unhealthy-recovery path is explicitly invoked.
 
-- at least one subsequent scheduled measurement cycle;
-- challengers remain current-cycle eligible;
-- retained entries used in the next transition remain current-cycle eligible;
-- no material degradation of pool-level health;
-- the current hypothetical/real revision is the expected canary revision;
-- initial real rollout includes a client sanity check.
+### <4 eligible retained
 
-Promotion does not automatically erase `pre_canary_baseline`.
+Treat the pool as unhealthy and enter the recovery path. Every replacement still must pass current hard gates.
 
-Graduation is a distinct transition after sufficient post-promotion observation. Only graduation declares the new pool last-known-good and clears/replaces the old restore point.
+## 13. Every newcomer must be canaried before promotion
 
-If challengers fail before graduation:
+A full promoted pool MUST NOT contain a newcomer that was absent from the observed canary pool immediately preceding that promotion.
 
-- restore `pre_canary_baseline` using the appropriate shadow transition or real CAS publish;
-- mark challengers with recent-failure evidence;
-- do not permanently blacklist them; history can recover after later evidence.
+Example of an invalid transition:
 
-## 16. Shadow transition contract
+```text
+baseline: A B C D E F G H
+canary:   A B C D E F X Y
+promoted: A B C D X Y Z W   <-- INVALID: Z/W were never canaried
+```
 
-The shadow state machine should support at least:
+Valid alternatives:
+
+### Option A — promote only observed newcomers
+
+```text
+baseline: A B C D E F G H
+wave 1:   A B C D E F X Y
+promote:  A B C D E F X Y
+```
+
+### Option B — multiple canary waves
+
+```text
+baseline: A B C D E F G H
+wave 1:   A B C D E F X Y
+observe wave 1
+wave 2:   A B C D X Y Z W
+observe wave 2
+promote:  A B C D X Y Z W
+```
+
+Every address newly introduced by a wave must remain current-cycle eligible through that wave's observation gate.
+
+The pinned pre-canary baseline remains the original baseline across all waves until explicit graduation.
+
+## 14. Pin the pre-canary baseline
+
+Before leaving a stable baseline for canary wave 1, pin:
+
+```text
+pre_canary_baseline = last-known-good shadow pool
+```
+
+It does not advance merely because `shadow_previous` changes, another canary wave occurs, or a promoted pool begins observation.
+
+This is the optimizer's system restore point.
+
+## 15. Baseline restore must be revalidated
+
+A pinned baseline is historical evidence of prior goodness, not unconditional permission to republish it later.
+
+Before any restore transition, every baseline entry MUST have current-cycle measurement evidence and pass the hard gates in section 6.
+
+### 15.1 Entire baseline still eligible
+
+Shadow mode may restore the exact baseline. Eventual real activation may CAS-publish the exact pinned baseline only when:
+
+- every baseline entry is currently eligible;
+- current authoritative revision matches the expected failed experiment revision;
+- the baseline fingerprint matches the pinned fingerprint.
+
+### 15.2 Any baseline member currently fails or lacks measurements
+
+Do NOT restore the stale snapshot verbatim.
+
+Transition to:
+
+```text
+restore_blocked_baseline_degraded
+```
+
+Then either:
+
+- hold/no-publish while collecting complete measurements; or
+- enter the gated unhealthy-recovery path to construct a new currently eligible safe pool.
+
+The system MUST NOT silently replace failing baseline members and still call the result a restoration of the pinned baseline. That is a new recovery decision with its own evidence and revision.
+
+## 16. Canary observation and promotion
+
+A canary wave becomes eligible for the next transition only after:
+
+- at least one subsequent scheduled cycle;
+- all entries whose status matters to the transition have current-cycle measurements;
+- all selected entries remain current-cycle eligible;
+- pool-level health/diversity remain acceptable;
+- the observed shadow/current revision and pool fingerprint still match the expected canary wave;
+- eventual initial real rollout also includes a client sanity check.
+
+If any of those conditions fail, hold or restore/recover according to sections 15 and 19.
+
+## 17. Promoted observation and graduation
+
+Promotion does not immediately establish a new last-known-good baseline.
+
+When a canary has passed, create a `promoted_experiment` record containing at minimum:
+
+```json
+{
+  "revision":"shadow-... or real revision",
+  "fingerprint":"...",
+  "entries":[],
+  "promoted_at":"..."
+}
+```
+
+During post-promotion observation, `pre_canary_baseline` stays pinned.
+
+### 17.1 Graduation identity gate
+
+Before graduation may clear/replace the pinned baseline, verify:
+
+1. current shadow/authoritative revision equals `promoted_experiment.revision`;
+2. current canonical pool fingerprint equals `promoted_experiment.fingerprint`;
+3. current entries are the same observed promoted pool;
+4. all required post-promotion observations and hard gates pass.
+
+If another authorized mutation, recovery, or manual operation changed revision or pool:
+
+```text
+graduation = hold / revision_or_pool_mismatch
+```
+
+Do NOT clear `pre_canary_baseline` and do NOT declare the unobserved replacement last-known-good.
+
+Only a matching, fully observed promoted experiment may graduate.
+
+## 18. Shadow transition contract
+
+At minimum:
 
 ```text
 baseline_hold
-baseline_to_canary
-canary_hold
-canary_to_promoted
+baseline_to_canary_wave
+canary_wave_hold
+canary_wave_to_next_wave
+canary_wave_to_promoted_observation
 canary_restore_baseline
+restore_blocked_baseline_degraded
 promoted_hold_observation
 promoted_graduate
 promoted_restore_baseline
 unhealthy_recovery
+measurement_incomplete_hold
+revision_or_pool_mismatch_hold
 ```
 
 Every transition records:
 
-- prior shadow revision;
-- resulting shadow revision;
+- prior and resulting shadow revision;
 - phase;
-- selected entries;
-- pinned pre-canary baseline revision if present;
+- selected entries/fingerprint;
+- canary wave number;
+- pinned baseline revision/fingerprint;
+- promoted experiment revision/fingerprint when present;
 - reason code;
 - current pool health summary;
-- Stage B-v2 overlap count;
+- Stage B-v2 overlap;
 - no secrets.
 
-Invalid or impossible transitions fail closed in shadow state and do not affect Stage B measurement.
+Impossible transitions fail closed in shadow state and never affect Stage B measurement.
 
-## 17. Pool-level comparison
+## 19. Failure behavior
 
-Promotion should compare pools, not only individual top candidates.
+- Candidate-history corruption: rebuild from detailed runs; do not publish from corrupt history.
+- Shadow-state corruption: stop/reset shadow progression; Stage B measurement continues.
+- Required shadow/current entry lacks current-cycle probes: `measurement_incomplete_hold`.
+- Current hard-gate failure: candidate ineligible regardless of history/incumbent/baseline status.
+- Shadow lineage mismatch: hold; never silently rebase to real Stage B.
+- Canary/newcomer fails: attempt baseline restore only after baseline revalidation.
+- Pinned baseline degraded: do not restore stale baseline; hold or unhealthy recovery.
+- Graduation revision/pool mismatch: hold and preserve baseline.
+- Real revision conflict after eventual activation: fail closed; do not retry-overwrite.
+- NAS state loss: remote-state reconciliation remains future hardening; do not guess authority.
 
-Useful pool statistics include:
+## 20. Adaptive sampling remains later
 
-- median final score;
-- minimum reliability among selected entries;
-- number of distinct `/24` prefixes;
-- number of newcomers;
-- overlap with shadow current pool;
-- selected candidates with low confidence;
-- number of retained entries that pass current hard gates.
-
-A high median score must not compensate for a currently failing selected entry.
-
-## 18. Explainability and persisted evidence
-
-Every shadow cycle should persist enough compact JSON evidence to explain a decision without reading source code.
-
-Example:
-
-```json
-{
-  "decision": "baseline_to_canary",
-  "shadow_revision": "shadow-102",
-  "shadow_parent_revision": "shadow-101",
-  "pre_canary_baseline_revision": "shadow-101",
-  "current_pool_healthy": true,
-  "eligible_retained": 6,
-  "challengers": 2,
-  "pool_overlap": 6,
-  "improvement": 0.18,
-  "reason": "stable improvement above hysteresis with mature challengers"
-}
-```
-
-Candidate components may include instant/stability/confidence/historical-weight/final-score fields.
-
-No new human-facing CLI reporting commands are required in this implementation slice; the persisted JSON is the contract needed for later analysis tooling.
-
-## 19. Adaptive sampling remains a later shadow feature
-
-The first multi-week measurement window showed strongly non-uniform prefix productivity and sparse per-IP repeat coverage. The calibration addendum therefore recommends future adaptive stratified sampling with a non-zero exploration budget.
-
-However, the current seven-day fixed-seed experiment intentionally freezes Stage B sampling. Adaptive sampling MUST NOT be enabled during this window.
-
-After the fixed-seed evidence is reviewed, a later shadow sampler may target roughly:
+The prior multi-week window showed prefix productivity is strongly non-uniform, so a later shadow sampler may target roughly:
 
 ```text
-70–80% exploitation of productive strata/fixed seeds
-20–30% unbiased full-range exploration
+70–80% exploitation
+20–30% full-range exploration
 ```
 
-Sampling remains separate from eligibility/scoring and never authorizes publication by itself.
+But adaptive sampling is not enabled during the current fixed-seed experiment. When later implemented, sampling decides what to measure; it never overrides eligibility or authorizes publication.
 
-## 20. Data retention
+## 21. Data retention
 
-Current detailed-run retention (30 days) and compact history retention (180 days) remain sufficient initially.
-
-Derived candidate and shadow state must be bounded. Candidate entries not observed for a configured aging interval should be pruned after their influence decays.
-
-No unbounded per-probe append-only file is introduced.
-
-## 21. Failure behavior
-
-- Corrupt derived candidate history: rebuild from detailed runs; do not publish based on corrupt history.
-- Corrupt shadow state: stop/reset shadow progression; continue Stage B measurements.
-- Insufficient history: v2 ranking falls back toward Stage B instant score through low confidence.
-- Historical parser error: fail v2 shadow computation but allow Stage B measurement history to continue.
-- Current hard-gate failure: candidate is ineligible regardless of history or retained/incumbent status.
-- Shadow lineage mismatch: fail the hypothetical transition; do not silently rebase onto real Stage B current.
-- Real revision conflict after eventual activation: do not retry/overwrite.
-- NAS state loss: remote-state reconciliation remains separate future hardening; v2 must not guess remote authority.
+Detailed runs remain retained for 30 days and compact history for 180 days initially. Derived candidate and shadow state remain bounded. No unbounded per-probe append-only store is introduced.
 
 ## 22. TDD / evidence plan
 
 Implementation order:
 
-1. pure time-aware EWMA tests;
-2. candidate-history aggregation tests;
+1. time-aware EWMA tests;
+2. history aggregation tests;
 3. confidence/maturity tests;
 4. final-score blending tests;
-5. hard-gate precedence tests for both challengers and retained entries;
-6. shadow revision-lineage transition tests;
-7. shadow divergence-from-Stage-B tests;
-8. hybrid retained-count fallback tests (`6+2`, guarded `5+3`, no normal `4+4`);
-9. pre-canary-baseline pinning tests;
-10. canary promotion/graduation/restore tests;
-11. real restore contract tests using expected-revision CAS interfaces without enabling production publication;
-12. bounded persistence/corruption tests;
-13. NAS Docker runtime validation.
+5. hard-gate precedence tests;
+6. shadow-lineage persistence tests;
+7. measurement-cohort union tests proving every shadow-current/canary/promoted entry is probed;
+8. incomplete-measurement hold tests;
+9. retained-count fallback tests (`6+2`, guarded `5+3`, no normal `4+4`);
+10. pre-canary baseline pinning tests;
+11. one-wave and multi-wave canary tests;
+12. test that uncanaried newcomers cannot enter promotion;
+13. baseline revalidation tests, including degraded restore blocking;
+14. promoted revision/pool identity checks before graduation;
+15. expected-revision CAS interface tests without enabling production publication;
+16. bounded persistence/corruption tests;
+17. NAS Docker validation.
 
-No production publish behavior changes until shadow-mode evidence is reviewed.
+No production publication changes until shadow evidence is reviewed.
 
 ## 23. Acceptance gates before v2 controls publication
 
-- Stage B remains the authoritative selector during shadow collection.
-- v2 maintains an independent shadow revision lineage after the first divergence.
-- shadow canary age/progression is evaluated against shadow state, not real Stage B state.
-- `pre_canary_baseline` remains pinned through canary and post-promotion observation until explicit graduation.
-- a restore before graduation returns to that pinned baseline, not merely `previous`.
-- no candidate with current hard-gate failure is selected due to history or incumbent status.
-- normal hybrid canary does not retain failing old entries to satisfy a fixed ratio.
-- confidence cannot improve a bad performance score merely by sample count.
-- v2 decisions are reproducible from persisted evidence.
-- real rollback/restore design remains revision-CAS protected.
-- no new secrets are persisted.
-- CPU, memory, and disk growth remain bounded on the NAS.
-- current seven-day fixed-seed experiment remains unmodified.
+- Stage B remains authoritative during shadow collection.
+- Current seven-day fixed-seed experiment remains unchanged.
+- After that window, every `shadow_current`/active canary/promoted-observation entry receives current-cycle probes before transition decisions.
+- Missing current measurements cause hold, never stale reuse or artificial ineligibility.
+- v2 maintains its own shadow lineage after divergence.
+- Retained entries and challengers both pass current hard gates.
+- Every promoted newcomer has appeared in an observed canary wave.
+- `pre_canary_baseline` remains pinned until explicit graduation.
+- Restore revalidates every baseline entry; stale/degraded baselines are not republished.
+- Graduation verifies revision and pool fingerprint still match the promoted experiment.
+- Confidence cannot rescue bad current performance.
+- Decisions are reproducible from persisted evidence.
+- Eventual real mutations remain CAS protected.
+- No new secrets are persisted.
+- CPU, memory, and disk growth remain bounded.
 
-## 24. Calibration decisions and remaining empirical values
+## 24. Calibration decisions still empirical
 
-The first multi-week aggregate calibration recommends these initial shadow values:
+Initial shadow values:
 
 ```text
 EWMA_HALF_LIFE_HOURS=36
 MAX_HISTORY_WEIGHT=0.30
 ```
 
-Confidence maturity starts from the thresholds in section 10.
-
-Still empirical until the fixed-seed follow-up window is reviewed:
+Still empirical until the fixed-seed follow-up is reviewed:
 
 - 36h versus nearby EWMA half-lives;
-- confidence maturity thresholds;
-- required canary observation duration before promotion/graduation;
-- exact conditions under which guarded `5+3` is preferable to hold/no-publish;
-- adaptive sampler exploitation/exploration ratio.
+- confidence thresholds;
+- canary wave observation duration;
+- guarded `5+3` versus hold behavior;
+- number of challengers per canary wave;
+- adaptive sampler exploration/exploitation ratio.
 
-These are operational calibration parameters. They do not weaken the safety invariants above.
+These values may change; the safety invariants above do not.
