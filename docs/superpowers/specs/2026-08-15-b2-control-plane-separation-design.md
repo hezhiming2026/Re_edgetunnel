@@ -9,7 +9,7 @@ Scope: design only; no production routing changes
 
 The current Worker serves tunnel traffic, subscription delivery, browser administration, and machine optimizer operations on one hostname. Tunnel compatibility benefits from a permissive Cloudflare edge posture, while admin and machine-control endpoints benefit from a strict authentication perimeter. Keeping them on the same hostname forces one edge policy to serve conflicting security requirements.
 
-This design separates those responsibilities into independent host roles, preserves Stage B ingress measurement semantics, and removes credential fallback relationships without rotating the currently effective tunnel identity.
+This design separates those responsibilities into independent host roles, preserves Stage B ingress measurement semantics, and removes credential fallback relationships without rotating the currently effective tunnel identity or breaking documented legacy subscription paths.
 
 Reusable documentation and tests MUST use placeholders. Operator-specific domains, account IDs, tokens, tunnel IDs, NAS addresses, optimizer seeds, and raw measurement data are not part of the reusable contract.
 
@@ -24,7 +24,7 @@ Reusable documentation and tests MUST use placeholders. Operator-specific domain
 7. Remove legacy high-value secret storage and credential fallbacks without breaking existing clients.
 8. Make host-to-route authorization explicit, pairwise-disjoint, default-deny, and exhaustively testable.
 9. Support a long-lived production `workers.dev` disaster-recovery data-plane endpoint without implicitly trusting preview/extra Worker hostnames.
-10. Migrate in bounded stages with explicit rollback gates.
+10. Migrate in bounded stages with explicit rollback gates, including safe rollback from any enforcement-capable release.
 
 ## 3. Non-goals
 
@@ -61,6 +61,10 @@ The single data-plane hostname emitted into generated subscriptions and used as 
 ### Effective UUID
 
 The UUID actually accepted by the current production tunnel implementation. It may be explicitly configured or, in legacy deployments, deterministically derived from fallback credentials and `KEY`.
+
+### Legacy KEY shortcut
+
+The documented exact `/<KEY>` subscription shortcut. It is a read-only compatibility route, not a general authorization mechanism and not admin authority.
 
 ### Credential handoff
 
@@ -112,11 +116,7 @@ OPS_HOSTS=${OPS_HOSTNAME}
 
 `DATA_PLANE_HOSTS`, `ADMIN_HOSTS`, and `OPS_HOSTS` MUST be pairwise disjoint after deterministic normalization.
 
-Normalization MUST occur before membership/overlap checks and at minimum handles:
-
-- lowercase hostname;
-- no port;
-- one canonical trailing-dot form.
+Normalization MUST occur before membership/overlap checks and at minimum handles lowercase hostname, no port, and one canonical trailing-dot form.
 
 Configuration validation MUST fail closed when any normalized hostname appears in more than one role set.
 
@@ -145,19 +145,15 @@ The final matrix is:
 | tunnel WS/gRPC/XHTTP | allow | deny | deny | deny |
 | canonical subscription render | allow | deny | deny | deny |
 | optional `/sub` compatibility helper | canonical render only | redirect-only to canonical DATA URL | deny | deny |
+| bounded legacy `/<KEY>` shortcut during migration overlap | read-only redirect/render compatibility only | deny | deny | deny |
 | `/login`, `/logout`, `/admin/*` | deny | allow | deny | deny |
 | general `/ops/*` mutation/status/diagnostics | deny | deny | allow | deny |
 | exact bounded ingress probe | allow | deny | deny for scoring | deny |
 | benign data masquerade/root | allow | deny unless explicitly required | deny | deny |
 
-The **only** control-looking exception on a data hostname is the exact bounded read-only ingress probe defined in section 8. No prefix-based `/ops/*` authority is inherited from it.
+The only control-looking exception on a DATA hostname is the exact bounded read-only ingress probe defined in section 8. The legacy `/<KEY>` route, while its migration overlap is active, is also exact-match and read-only; it confers no admin/ops authority and MUST NOT be implemented as a prefix/wildcard route.
 
-Tests MUST cover every negative cell above, including:
-
-- DATA rejecting login/admin/general ops;
-- ADMIN rejecting tunnels/general ops/probe;
-- OPS rejecting tunnels/subscription/admin/probe-for-scoring;
-- unknown host rejecting everything before dispatch.
+Tests MUST cover every negative cell above, including DATA rejecting login/admin/general ops, ADMIN rejecting tunnels/general ops/probe, OPS rejecting tunnels/subscription/admin/probe-for-scoring, and unknown host rejecting everything before dispatch.
 
 A future sensitive route is denied on every role until it is explicitly assigned and tested.
 
@@ -185,21 +181,11 @@ GET /probe/optimizer/v1
 
 The current exact legacy path `GET /ops/optimizer/v1/probe` MAY be temporarily mapped to the same bounded handler during migration, but it MUST NOT inherit any other `/ops/*` behavior.
 
-The handler MUST:
-
-- accept GET only;
-- require `OPTIMIZER_TOKEN` or an equivalent dedicated probe credential;
-- perform no KV/DO mutation;
-- perform no outbound fetch/dial;
-- return exactly the deterministic 65,536-byte probe contract;
-- send `Cache-Control: no-store`;
-- expose no control-plane state/secrets;
-- work through every registered data-plane hostname;
-- be tested by dialing candidate IP + `CANONICAL_EDGE_HOST` SNI/Host.
+The handler MUST accept GET only, require `OPTIMIZER_TOKEN` or an equivalent dedicated probe credential, perform no KV/DO mutation or outbound fetch/dial, return exactly 65,536 deterministic bytes, send `Cache-Control: no-store`, expose no control-plane state/secrets, work through each registered DATA hostname, and be tested by dialing candidate IP + `CANONICAL_EDGE_HOST` SNI/Host.
 
 ### 8.2 Separate NAS endpoints and credentials
 
-Control traffic and measurement traffic MUST be configured separately. The implementation contract should expose equivalent settings to:
+Control traffic and measurement traffic MUST be configured separately with equivalent settings to:
 
 ```text
 OPS_BASE_URL=https://${OPS_HOSTNAME}
@@ -212,33 +198,42 @@ OPTIMIZER_TOKEN=<secret>
 Rules:
 
 - status/publish/rollback/egress-diagnostic calls use `OPS_BASE_URL`;
-- those ops calls send Cloudflare Access service-token headers **and** Worker `Authorization: Bearer <OPTIMIZER_TOKEN>`;
-- candidate probes dial the candidate IP while keeping `PROBE_HOST` as TLS SNI/HTTP Host;
-- Access service credentials are never sent to the data-plane probe;
+- ops calls send Cloudflare Access service-token headers and Worker `Authorization: Bearer <OPTIMIZER_TOKEN>`;
+- candidate probes dial candidate IP while keeping `PROBE_HOST` as TLS SNI/HTTP Host;
+- Access service credentials are never sent to the DATA probe;
 - `WORKER_BASE_URL` MUST NOT remain an ambiguous single setting once the split is activated;
-- NAS canaries must test ops and probe paths independently.
+- NAS canaries test ops and probe paths independently.
 
 Before moving any NAS ops consumer to the Access-protected host, the Access service token MUST already be provisioned, installed on NAS, and verified end-to-end.
 
 ## 9. `workers.dev` disaster-recovery policy
 
-The production `workers.dev` hostname is a first-class long-lived DR data-plane endpoint.
+The production `workers.dev` hostname is a first-class long-lived DR DATA endpoint.
 
 1. Its exact production hostname must be explicitly present in `DATA_PLANE_HOSTS` before use.
 2. It never implicitly gains admin or ops authority.
 3. Preview URLs remain untrusted by default.
-4. Default recommendation remains:
+4. Default recommendation remains Custom Domain primary/canonical with production `workers.dev` as disaster recovery.
+5. The operator MAY later choose `workers.dev` as `CANONICAL_EDGE_HOST` in a separate migration without UUID rotation.
+6. It MUST NOT be enabled publicly while host-agnostic control routing could expose `/login`, `/admin/*`, or general `/ops/*` on that hostname.
+7. Therefore `workers.dev` is enabled only atomically with DATA-only role enforcement already active for it.
+8. Do not switch the canonical host during the current fixed-seed experiment.
+
+### 9.1 Rollback invariant for `workers.dev`
+
+Once `workers.dev` has become publicly reachable, any rollback to a Worker release/configuration that does not enforce the DATA-only host matrix MUST first disable the public `workers.dev` route, or disable it atomically with that rollback.
+
+Required order:
 
 ```text
-primary/canonical = operator Custom Domain
-disaster recovery = production workers.dev hostname
+disable workers.dev route (or prepare atomic disable)
+-> verify it is no longer externally reachable as a Worker route
+-> roll back to pre-enforcement Worker release
 ```
 
-5. The operator MAY later choose `workers.dev` as `CANONICAL_EDGE_HOST` in a separate migration.
-6. Such a switch does not rotate UUID.
-7. It MUST NOT be enabled publicly while host-agnostic control routing would still expose `/login`, `/admin/*`, or general `/ops/*` on that hostname.
-8. Therefore `workers.dev` is enabled only atomically with data-only role enforcement already active for it. From its first externally reachable request it is a DATA role and nothing else.
-9. Do not switch the canonical host during the current fixed-seed experiment.
+A rollback that restores host-agnostic dispatch while leaving `workers.dev` public is forbidden because it would re-expose login/admin/general-ops routes on the DR hostname.
+
+If the route cannot be disabled safely, rollback to a pre-enforcement release is blocked; use an enforcement-capable known-good release or a forward fix instead.
 
 ## 10. Subscription hostname and token contract
 
@@ -250,14 +245,7 @@ An admin-plane `/sub` helper, if retained, is redirect-only to the canonical DAT
 
 ### 10.2 Independent `SUB_TOKEN`
 
-Introduce an independent random `SUB_TOKEN` (preferred for this single-operator deployment) or dedicated HMAC secret.
-
-Requirements:
-
-- at least 32 random bytes before encoding;
-- constant-time comparison after hashing or equivalent bounded comparison;
-- no token value in logs;
-- independently rotatable without changing UUID.
+Introduce an independent random `SUB_TOKEN` (preferred for this single-operator deployment) or dedicated HMAC secret. It is independently rotatable without changing UUID and MUST NOT be logged.
 
 ### 10.3 Mandatory bounded legacy overlap
 
@@ -266,17 +254,23 @@ Migration from hostname/UUID-derived subscription authorization MUST have a read
 ```text
 new SUB_TOKEN accepted = yes
 legacy subscription token accepted read-only = yes
-legacy token mutation authority = none
+legacy exact /<KEY> shortcut accepted read-only = yes, only while required by overlap
+legacy credential mutation authority = none
 ```
+
+The exact `/<KEY>` shortcut is part of the compatibility surface because existing documented clients may refresh through it without directly presenting the derived legacy subscription token. Strict host enforcement MUST NOT silently remove it before its users are migrated.
+
+The shortcut MAY be retired before Phase D only if the operator can prove every known client that used it has been migrated and successfully refreshed through the new canonical `SUB_TOKEN` URL. Otherwise it remains enabled on DATA hosts through the bounded overlap and is removed together with the legacy subscription authorization at the explicit retirement gate.
 
 Legacy acceptance may be disabled only after:
 
 1. the new canonical subscription URL using `SUB_TOKEN` refreshes successfully;
 2. every known client refreshes successfully at least once with the new token;
-3. at least 24 hours of grace passes after the last known client migration with no required legacy-token use;
-4. the operator explicitly completes the retirement gate.
+3. every known `/<KEY>` shortcut user has migrated, or no such user exists with evidence;
+4. at least 24 hours of grace passes after the last known client migration with no required legacy use;
+5. the operator explicitly completes the retirement gate.
 
-Rollback may re-enable read-only overlap without changing UUID.
+Rollback may re-enable the bounded read-only legacy token and exact `/<KEY>` shortcut without changing UUID.
 
 ## 11. Credential-role contract
 
@@ -292,26 +286,36 @@ Cloudflare Access human policy is layer 1. Worker `ADMIN` session/auth is layer 
 
 ### 11.3 Ops credentials
 
-Cloudflare Access Service Auth is layer 1. `OPTIMIZER_TOKEN` is layer 2.
+Cloudflare Access Service Auth is layer 1. `OPTIMIZER_TOKEN` is layer 2. Access service credentials and `OPTIMIZER_TOKEN` are independent and separately revocable.
 
-Access service credentials and `OPTIMIZER_TOKEN` are independent and separately revocable. NAS does not receive Worker deployment/zone-management credentials to call ops APIs.
+### 11.4 Materialize ADMIN before UUID materialization when required
 
-### 11.4 Materialize the current effective UUID before fallback removal
+Current legacy code may resolve `adminPassword` through aliases that include `UUID`. An invalid explicit legacy `UUID` can therefore simultaneously act as an admin fallback input while a different valid tunnel UUID is derived from it.
 
-Legacy code may derive the actual tunnel UUID when no valid explicit `UUID` exists. Removing credential fallback/derivation without first preserving that value can rotate or destroy tunnel identity.
+Before writing a derived effective tunnel UUID back into explicit `UUID`, the migration MUST determine whether the currently effective admin credential depends on `UUID`, `uuid`, or any other fallback input that will change as part of identity materialization.
+
+If it does, the migration MUST first:
+
+1. provision a new independent high-entropy `ADMIN` secret;
+2. verify the dedicated ADMIN hostname through Cloudflare Access plus Worker login/session using that explicit `ADMIN`;
+3. verify admin resolution no longer depends on `UUID`/legacy aliases;
+4. only then write the effective tunnel UUID into explicit `UUID`.
+
+An implementation MAY instead remove the UUID-to-admin fallback atomically with the UUID materialization, but it must prove there is no intermediate release in which the newly written tunnel UUID becomes an accepted admin password.
+
+### 11.5 Materialize the current effective UUID before fallback removal
 
 Before any code that changes/removes legacy UUID derivation is deployed, the migration MUST:
 
-1. compute the exact effective UUID using the currently deployed production inputs and algorithm;
-2. record it as an explicit production `UUID` secret/value without changing its bytes;
-3. deploy with the explicit UUID while legacy derivation is still available;
-4. verify the effective UUID before/after is identical;
-5. verify existing subscription output and at least one real tunnel canary still authenticate with that UUID;
-6. only then remove fallback derivation and credential aliases.
+1. compute the exact effective tunnel UUID using the currently deployed production inputs and algorithm;
+2. satisfy section 11.4 first when admin resolution could be affected;
+3. record exactly that tunnel identity as explicit production `UUID` without changing its bytes;
+4. deploy while the old tunnel derivation path is still verifiably compatible or remove it atomically;
+5. prove the effective tunnel UUID before/after is identical;
+6. verify existing subscription output and at least one real tunnel canary still authenticate with that UUID;
+7. only then retire implicit tunnel derivation and credential aliases.
 
-If the effective UUID cannot be determined or equality cannot be proven, credential-fallback retirement is blocked.
-
-This migration is **identity materialization**, not UUID rotation.
+If effective UUID equality cannot be proven, fallback retirement is blocked. This is identity materialization, not UUID rotation.
 
 ## 12. Legacy secret surface removal
 
@@ -321,162 +325,149 @@ Unless a concrete use case is proven, remove after migration gates pass:
 2. Cloudflare high-value credential persistence in KV (`cf.json`);
 3. Telegram bot-token persistence in general KV; retained Telegram token becomes a Worker secret;
 4. generic admin-password fallback through `PASSWORD`, `TOKEN`, `KEY`, or `UUID`;
-5. implicit UUID derivation only after section 11.4 has materialized and verified the existing effective UUID.
+5. implicit UUID derivation only after sections 11.4/11.5 are satisfied;
+6. legacy `/<KEY>` subscription shortcut only after section 10.3 retirement gates are satisfied.
 
 ## 13. Cloudflare deployment credential separation and revocation
 
-Replace the current broad Cloudflare credential with least-privilege credentials.
+Replace the current broad Cloudflare credential with least-privilege Worker deploy and zone-security credentials.
 
-### Worker deploy token
-
-Only permissions required to deploy Worker resources and required Worker/KV/DO configuration.
-
-### Zone security token
-
-Only permissions required for intended hostname-scoped Zone/WAF/security policy.
-
-Zone-security mutation becomes an explicit infrastructure action instead of an implicit side effect of every Worker deploy.
-
-### Mandatory handoff
-
-The old broad `CLOUDFLARE_API_TOKEN` or equivalent MUST NOT remain valid indefinitely after the split.
-
-Required sequence:
+Required handoff:
 
 1. create least-privilege Worker deploy token;
 2. create least-privilege zone-security token if needed;
 3. update CI/secrets to use each token only for its role;
-4. successfully run a Worker deployment validation with the new deploy token;
-5. successfully validate the intended zone/security operation with the new zone token;
+4. successfully validate Worker deployment with the new deploy token;
+5. validate the intended zone/security operation with the new zone token;
 6. confirm no workflow/runtime path still depends on the old broad token;
 7. explicitly revoke/delete the superseded broad token at Cloudflare;
-8. record non-secret revocation evidence/time in the rollout report.
+8. record non-secret revocation evidence/time.
 
-Failure to revoke the old broad credential means the least-privilege migration is incomplete.
+Failure to revoke the old broad credential means least-privilege migration is incomplete.
 
 ## 14. Migration sequencing
-
-The final host matrix is absolute. Migration uses sequencing, not a permanent compatibility bypass.
 
 ### Phase A — code/contracts only
 
 - implement host-role classifier and pairwise-disjoint validation;
-- implement complete host-role-by-sensitive-route negative matrix tests;
+- implement complete host-role negative matrix tests;
 - implement canonical subscription host logic;
-- implement bounded data-plane probe;
+- implement bounded DATA probe;
 - add strict credential role tests;
-- add effective-UUID materialization test/support;
+- add independent ADMIN materialization and effective-UUID materialization support/tests;
 - add split NAS ops/probe configuration support;
+- add exact read-only legacy `/<KEY>` compatibility handling;
 - production behavior remains unchanged.
 
-### Phase B — provision control hosts, keep new DR data route disabled
+### Phase B — provision control hosts; DR DATA route disabled
 
 - add/provision `ADMIN_HOSTNAME` and `OPS_HOSTNAME`;
 - configure Access human and Service Auth policies;
 - provision NAS Access service credentials;
-- verify admin host with human Access + Worker admin auth;
+- verify admin host with human Access + explicit Worker `ADMIN` auth;
 - verify ops host with Access service token + `OPTIMIZER_TOKEN`;
-- verify separate NAS ops/probe configuration in canary mode;
-- **do not enable the production `workers.dev` route yet** while existing host-agnostic routing remains active.
+- verify separate NAS ops/probe configuration;
+- do not enable production `workers.dev` while host-agnostic routing remains active.
 
-### Phase C — migrate consumers while existing primary host still supports legacy behavior
+### Phase C — migrate consumers while primary legacy path remains available
 
-- move browser admin use to `ADMIN_HOSTNAME`;
-- move machine mutation/status calls to `OPS_BASE_URL` using Access service credentials + `OPTIMIZER_TOKEN`;
-- keep candidate probing on candidate IP + `CANONICAL_EDGE_HOST` via the bounded DATA probe;
-- enable `SUB_TOKEN` with mandatory read-only legacy overlap;
-- migrate/verify known subscription clients;
-- materialize and verify the current effective UUID as explicit `UUID` before fallback removal.
+Order is normative:
+
+1. move browser admin use to `ADMIN_HOSTNAME`;
+2. provision/verify explicit independent `ADMIN` before any UUID write that could change admin fallback resolution;
+3. move machine mutation/status calls to `OPS_BASE_URL` with Access service credentials + `OPTIMIZER_TOKEN`;
+4. keep candidate probing on candidate IP + `CANONICAL_EDGE_HOST` via bounded DATA probe;
+5. enable `SUB_TOKEN` with mandatory read-only legacy token and `/<KEY>` overlap;
+6. migrate/verify known subscription clients and legacy shortcut users;
+7. materialize and verify the effective tunnel UUID as explicit `UUID`.
 
 ### Phase D — atomic host-role enforcement and `workers.dev` enablement
 
 After Phase C evidence is complete:
 
-1. deploy strict host-role enforcement for the existing registered roles;
-2. verify DATA rejects admin/general ops, ADMIN rejects tunnels/ops, OPS rejects tunnels/admin, and unknown hosts fail closed;
-3. only then enable the exact production `workers.dev` hostname with DATA role enforcement already active;
-4. canary `workers.dev` tunnel/sub/probe behavior;
-5. confirm `workers.dev` rejects login/admin/general ops from its first public availability.
+1. deploy strict host-role enforcement for existing registered roles;
+2. verify all negative matrix cells;
+3. confirm any still-required `/<KEY>` route is exact-match/read-only only;
+4. only then enable exact production `workers.dev` with DATA-only enforcement already active;
+5. canary `workers.dev` tunnel/sub/probe behavior and confirm login/admin/general ops are rejected from first public availability.
 
-No compatibility flag may reopen `/admin` or general `/ops/*` on a DATA hostname after this cutover.
+No compatibility flag may reopen admin/general-ops authority on a DATA hostname.
 
-### Phase E — retire legacy credentials
+### Phase E — retire legacy credentials and shortcuts
 
-- disable legacy subscription token only after section 10.3 gates pass;
-- remove admin credential fallbacks only after explicit role secrets are proven;
-- remove implicit UUID derivation only after section 11.4 proof;
+- disable legacy subscription token and `/<KEY>` only after section 10.3 gates pass;
+- remove admin credential fallbacks only after explicit `ADMIN` is proven;
+- remove implicit UUID derivation only after sections 11.4/11.5 proof;
 - remove legacy secret-management surfaces;
-- complete Cloudflare least-privilege token handoff and explicitly revoke the old broad token.
+- complete Cloudflare least-privilege token handoff and revoke old broad token.
 
 ### Optional Phase F — canonical host switch
 
-Only after the current optimizer experiment and a separate ingress baseline decision:
-
-- optionally set `CANONICAL_EDGE_HOST` to production `workers.dev`;
-- run tunnel/subscription canaries;
-- update `PROBE_HOST` to the new canonical hostname;
-- treat subsequent ingress measurements as a new baseline;
-- retain a Custom Domain as alternate data-plane host where practical.
+Only after the current optimizer experiment and a separate ingress baseline decision, optionally set `CANONICAL_EDGE_HOST` to production `workers.dev`, run tunnel/subscription canaries, update `PROBE_HOST`, and treat subsequent ingress measurements as a new baseline.
 
 ## 15. Rollback
 
 - Before strict enforcement, rollback keeps the existing primary route while fixing new Access/control-host configuration.
-- After strict enforcement, rollback uses a known previous deployment/configuration release; it does not selectively reopen arbitrary control routes on DATA hosts.
-- `workers.dev` can be disabled independently if its canary fails; the primary Custom Domain remains available.
-- Subscription-token rollback re-enables bounded read-only legacy overlap.
-- Ops migration rollback restores NAS control calls to the previously proven endpoint only if that endpoint is still intentionally supported by the current migration phase.
-- UUID is never rotated merely for hostname/control-plane rollback; the explicitly materialized effective UUID remains the identity anchor.
-- Cloudflare broad-token revocation occurs only after both replacement credentials are proven; after revocation rollback uses the new scoped credentials, not resurrection of the broad token.
+- After `workers.dev` has been exposed, rollback to any release/configuration lacking strict DATA-only enforcement MUST satisfy section 9.1: disable `workers.dev` before or atomically with the rollback.
+- A rollback may keep `workers.dev` enabled only when the rollback target itself enforces the same DATA-only host matrix.
+- If a `workers.dev` canary fails while enforcement remains healthy, disable only that route and keep the primary Custom Domain.
+- Subscription rollback re-enables bounded read-only legacy token + exact `/<KEY>` overlap.
+- Ops rollback restores NAS control calls only to a previously proven endpoint intentionally supported by the current phase.
+- UUID is never rotated for hostname/control-plane rollback; explicitly materialized effective UUID remains the identity anchor.
+- Cloudflare broad-token revocation is not undone; rollback uses the new scoped credentials.
 
 ## 16. Test and evidence gates
 
 Implementation is not mergeable until all applicable gates pass:
 
-1. host role sets are pairwise disjoint; overlaps fail configuration validation;
+1. host role sets are pairwise disjoint;
 2. `CANONICAL_EDGE_HOST` belongs only to DATA;
 3. unknown hosts fail before dispatch;
-4. complete role-by-sensitive-route negative matrix from section 7 is tested;
-5. Custom Domain DATA tunnel/sub/probe path works;
-6. production `workers.dev` is not made externally reachable until DATA-only enforcement exists, then tunnel/sub/probe works and all foreign control routes are denied;
-7. generated subscriptions use only `CANONICAL_EDGE_HOST`;
-8. candidate probing uses candidate IP + `CANONICAL_EDGE_HOST` SNI/Host and the fixed 65,536-byte contract;
-9. Access-protected OPS hostname is not used for ingress scoring;
-10. NAS ops calls prove Access service credentials + `OPTIMIZER_TOKEN` are both required;
-11. NAS probe calls prove Access service credentials are not required/sent on DATA probe;
-12. no permanent credential fallback exists between ADMIN/UUID/SUB/OPTIMIZER roles;
-13. current effective UUID is materialized explicitly and equality is proven before UUID derivation/fallback removal;
-14. existing tunnel client canary succeeds before and after UUID materialization;
-15. mandatory legacy subscription overlap is tested through explicit retirement;
-16. least-privilege Worker and zone credentials are independently validated;
-17. superseded broad Cloudflare token is explicitly revoked after successful handoff;
-18. logs/responses expose no credential values;
-19. existing tunnel protocol tests remain green;
-20. Wrangler dry-run succeeds;
-21. rollout does not combine hostname migration with Stage C egress or optimizer-v2 scoring changes;
-22. current seven-day fixed-seed optimizer experiment remains unchanged.
+4. complete role-by-sensitive-route negative matrix is tested;
+5. primary Custom Domain DATA tunnel/sub/probe works;
+6. `workers.dev` cannot become reachable before DATA-only enforcement and rejects foreign control routes from first availability;
+7. rollback to a pre-enforcement release is blocked unless `workers.dev` is disabled before/atomically;
+8. generated subscriptions use only `CANONICAL_EDGE_HOST`;
+9. candidate probing preserves candidate IP + canonical SNI/Host and 65,536-byte contract;
+10. Access-protected OPS hostname is not used for ingress scoring;
+11. NAS ops calls require Access service credentials + `OPTIMIZER_TOKEN`;
+12. NAS DATA probe does not send Access credentials;
+13. explicit `ADMIN` is installed/verified before UUID materialization whenever current admin resolution could be changed by the UUID write;
+14. no intermediate state allows the tunnel UUID to become an admin credential;
+15. current effective tunnel UUID is materialized explicitly and equality is proven before derivation/fallback removal;
+16. existing tunnel client canary succeeds before and after UUID materialization;
+17. mandatory legacy token and exact `/<KEY>` overlap are tested through explicit retirement;
+18. existing `/<KEY>` clients are proven migrated before shortcut removal;
+19. least-privilege Worker and zone credentials are independently validated;
+20. superseded broad Cloudflare token is explicitly revoked;
+21. logs/responses expose no credential values;
+22. existing tunnel protocol tests remain green;
+23. Wrangler dry-run succeeds;
+24. rollout does not combine hostname migration with Stage C egress or optimizer-v2 scoring changes;
+25. current seven-day fixed-seed optimizer experiment remains unchanged.
 
 ## 17. Decisions frozen by this revision
 
 - One Worker remains the default topology.
-- Every registered hostname has exactly one role; role sets are pairwise disjoint.
-- Unknown hostnames fail closed.
-- Production `workers.dev` is a long-lived DR DATA endpoint, but it is never publicly enabled before DATA-only route enforcement exists for it.
-- Custom Domain remains the default canonical recommendation; `CANONICAL_EDGE_HOST` may later switch to production `workers.dev` in a separate migration.
-- Generated subscriptions use `CANONICAL_EDGE_HOST`, not the incoming request host.
-- Stage B ingress probes remain on the DATA Host/SNI path through one exact bounded read-only endpoint.
-- NAS control API and ingress probe configuration are separated; Access service credentials apply only to OPS traffic.
+- Every registered hostname has exactly one role; unknown hostnames fail closed.
+- Production `workers.dev` is a long-lived DR DATA endpoint and is never public before DATA-only enforcement.
+- A rollback to pre-enforcement code cannot leave `workers.dev` public.
+- Custom Domain remains default canonical recommendation; canonical host may later switch to production `workers.dev` separately.
+- Generated subscriptions use `CANONICAL_EDGE_HOST`.
+- Stage B ingress probes stay on DATA Host/SNI via exact bounded probe.
+- NAS ops API and probe configuration are separated; Access service credentials apply only to OPS traffic.
+- Independent `ADMIN` is established before UUID materialization whenever legacy admin fallback could otherwise change to the tunnel UUID.
 - Current effective tunnel UUID is materialized and verified before legacy derivation/fallback removal.
-- Subscription-token overlap is mandatory and bounded.
-- Cloudflare least-privilege credential migration is incomplete until the superseded broad token is revoked.
-- Host separation tests cover the full negative matrix, not only tunnel rejection.
-- Current seven-day fixed-seed experiment is not altered by this design.
+- Legacy subscription-token and documented exact `/<KEY>` compatibility overlap is mandatory until client migration is proven.
+- Cloudflare least-privilege migration is incomplete until the old broad token is revoked.
+- Current seven-day fixed-seed experiment is not altered.
 
 ## 18. References checked 2026-08-24
 
-- Cloudflare Workers routes and domains: https://developers.cloudflare.com/workers/configuration/routing/
-- Cloudflare Workers `workers.dev`: https://developers.cloudflare.com/workers/configuration/routing/workers-dev/
-- Cloudflare Workers Custom Domains: https://developers.cloudflare.com/workers/configuration/routing/custom-domains/
-- Cloudflare Access for Workers/hostnames: https://developers.cloudflare.com/workers/configuration/cloudflare-access/
-- Cloudflare Access service tokens: https://developers.cloudflare.com/cloudflare-one/access-controls/service-credentials/service-tokens/
+- Cloudflare Workers routes and domains
+- Cloudflare Workers `workers.dev`
+- Cloudflare Workers Custom Domains
+- Cloudflare Access for Workers/hostnames
+- Cloudflare Access service tokens
 
-These are implementation dependencies and MUST be rechecked immediately before production rollout because Cloudflare product behavior may change.
+These implementation dependencies MUST be rechecked immediately before production rollout because Cloudflare product behavior may change.
